@@ -1,0 +1,1821 @@
+diff --git a/docs/reference.md b/docs/reference.md
+index 389f782..a877d69 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -3225,16 +3225,16 @@ It changes nothing about what the program computes, and cannot be
+ combined with `extern`, `export`, `simd`, `recursive` or `thread_fn`.
+ 
+ `simd` asks for the function to be built once for the target's baseline
+-instruction set and once more for each wider one it supports (AVX2 and
+-AVX-512 on x86-64). At each call, the widest version the CPU has is
++instruction set and once more for each wider one it supports (AVX2, AVX2
++with AVX-VNNI, and AVX-512 on x86-64). At each call, the widest version the CPU has is
+ chosen. It suits a function holding a hot loop the C compiler can
+ vectorize: byte transforms, codecs, kernels over arrays. Every version
+ computes exactly what the baseline does, so nothing about a program's
+ output depends on it. A backend may ignore it, as the C backend does under
+ compilers other than clang and under the in-process TinyCC backend.
+ The exception is `math`'s `mul_add(x, y, z)`: `x * y + z` rounded once
+-where the code is built for FMA and twice where it is not. The AVX2 and
+-AVX-512 versions round once, and the baseline rounds as its target does.
++where the code is built for FMA and twice where it is not. The AVX2,
++AVX-VNNI and AVX-512 versions round once, and the baseline rounds as its target does.
+ Spec §7.12, §7.13.
+ 
+ ```goose
+@@ -4102,6 +4102,13 @@ standard library, written in Goose under `stdlib/` and documented in
+ | `qput(v)`, `qget<T>()`, `qpoll<T>()`, `qlimit<T>(n)` | the typed queues | [22](#22-threads) |
+ | `to_bytes(a)`, `to_bytes(a, out)`, `bytes_of(a)`, `from_bytes<T[>..]>(b)` | serialization | [23](#23-serialization) |
+ | `embed_file(path)`, `embed_shader(…)` | a file's bytes, or a compiled shader, read at compile time | [21](#embed_file) |
++| `dot_lanes(a, b) -> f32[8]` | `a` an `i8[32]` or `u8[32]`, `b` an `i8[32]`: lane k is `a[2k]*b[2k] + a[2k+1]*b[2k+1] + a[16+2k]*b[16+2k] + a[17+2k]*b[17+2k]`, summed exactly; one AVX2 multiply-add sequence in a `simd fn`'s versions, so a kernel accumulates lanes without a horizontal sum per block | [17](#function-qualifiers) |
++| `a.prefetch(i, n)` | A hint that `a[i..i+n]` is read soon: its cache lines are fetched ahead, clamped to the elements `a` has, with no other effect; for a kernel streaming weights from memory | [17](#function-qualifiers) |
++| `dot_quads_i(a, b, c) -> i32[8]` | `dot_quads`'s operands and lanes, kept as exact integers and added to the `i32[8]` `c` (wrapping): `vpmaddubsw`+`vpmaddwd`+`vpaddd` on AVX2, one `vpdpbusd` with AVX-VNNI | [17](#function-qualifiers) |
++| `dot_quads_s(a, b, s) -> i32[8]` | `dot_quads`'s operands with `s` an `i16[16]`: byte pair p (`a[2p]*b[2p] + a[2p+1]*b[2p+1]`, exact) times `s[p]`, lane k the sum of pairs 2k and 2k+1, exact in `i32`: per-pair scales applied before any float conversion, so a quantized block accumulates in integers | [17](#function-qualifiers) |
++| `dot_bytes(a, b, c?) -> i32[8]` | `a` a `u8[32]` over its whole range, `b` an `i8[32]`: lane k is `a[j] * b[j]` summed over `j = 4k..4k+3`, exact, plus lane k of the optional `i32[8]` `c` (wrapping); one `vpdpbusd` where the CPU has AVX-VNNI | [17](#function-qualifiers) |
++| `madd16(a, b) -> i32[8]` | `a` and `b` `i16[16]`: lane k is `a[2k]*b[2k] + a[2k+1]*b[2k+1]`, wrapping only for both pairs at -32768 (one `vpmaddwd`) | [17](#function-qualifiers) |
++| `dot_quads(a, b) -> f32[8]` | `b` an `i8[32]`, `a` a `u8[32]` capped at 127 or an `i8[32]` with both clamped to -127..127: lane k is `a[j] * b[j]` summed over `j = 4k..4k+3`; four to six AVX2 instructions in a `simd fn`, for quantized weights | [17](#function-qualifiers) |
+ 
+ The array members, `.len`, `.cap`, `.push`, `.append`, `.pop`, `.pop_n`,
+ `.resize`, `.clear`, `.index_of`, `.range_index`, `.check_length`, `.move_from` are in
+diff --git a/docs/stdlib.md b/docs/stdlib.md
+index e4cda4d..b94ceac 100644
+--- a/docs/stdlib.md
++++ b/docs/stdlib.md
+@@ -821,7 +821,9 @@ scalar converts to the component type, so an `f64` variable scaling a
+ `math` provides libm at both widths (`sin(x)` picks `sin` or `sinf` by the
+ argument's type): `sqrt sin cos tan asin acos atan atan2 exp log log2 log10
+ pow floor ceil round trunc`. These return floats as C does (`as i64`
+-converts).
++converts). `round_even` rounds to the nearest integer with ties to even
++(C's `rint`, in the one rounding mode Goose uses); it is inline, so a loop
++of them vectorizes where `round`'s ties away from zero would call libm.
+ `sqrt` is implemented in the runtime (`gs_sqrt`, `gs_sqrtf`). It gives the
+ same correctly rounded root as C, and NaN below zero, but without C's
+ errno, so it is the bare square root instruction where the C compiler
+@@ -900,6 +902,8 @@ fn time() -> f64                                     // seconds since the epoch
+ fn clock() -> f64                                    // monotonic, high resolution
+ fn time_ns() -> i64         fn clock_ns() -> i64
+ fn sleep(seconds: f64)      fn sleep_ms(ms: i64)
++fn queue_spin(n: i64)       // a qget on an empty queue pauses n times before it sleeps; 0 (default) sleeps at once, also GS_QSPIN
++fn pin_thread(cpu: i64) -> bool   // binds the calling thread to logical CPU cpu (Windows, Linux)
+ fn random_seed() -> u64                              // entropy, for rng
+ ```
+ 
+diff --git a/src/builtins.h b/src/builtins.h
+index 2242444..83ca1ef 100644
+--- a/src/builtins.h
++++ b/src/builtins.h
+@@ -91,9 +91,16 @@ inline int RecvKindOf(TypeExpr *t) {
+     F(B_FROM_BYTES,       "from_bytes",       1,  1,   "",   "",  0,              "",            BF_TYARGS) \
+     F(B_EMBED_SHADER,     "embed_shader",     1, 99,   "",   "",  0,              "",            0) \
+     F(B_EMBED_FILE,       "embed_file",       1,  1,   "",   "",  0,              "",            0) \
++    F(B_DOT_LANES,        "dot_lanes",        2,  2,   "",   "",  0,              "",            0) \
++    F(B_DOT_QUADS,        "dot_quads",        2,  2,   "",   "",  0,              "",            0) \
++    F(B_DOT_QUADS_S,      "dot_quads_s",      3,  3,   "",   "",  0,              "",            0) \
++    F(B_DOT_QUADS_I,      "dot_quads_i",      3,  3,   "",   "",  0,              "",            0) \
++    F(B_MADD16,           "madd16",           2,  2,   "",   "",  0,              "",            0) \
++    F(B_DOT_BYTES,        "dot_bytes",        2,  3,   "",   "",  0,              "",            0) \
+     F(B_LEN,              "len",              1,  1,   "",   "i", BR_ANY,         "",            BF_MEMBER | BF_PROPERTY) \
+     F(B_CAP,              "cap",              1,  1,   "",   "i", BR_LIMITED,     "",            BF_MEMBER | BF_PROPERTY) \
+     F(B_INDEX_OF,         "index_of",         2,  2,   "",   "i", BR_INDEXABLE,   "",            BF_MEMBER) \
++    F(B_PREFETCH,         "prefetch",         3,  3,   "ii", "",  BR_ANY,         "",            BF_MEMBER) \
+     F(B_RANGE_INDEX,      "range_index",      2,  3,   "",   "i", BR_INDEXABLE,   "",            BF_MEMBER) \
+     F(B_CHECK_LENGTH,     "check_length",     2,  3,   "i",  "i", BR_GROW | BR_GROWSHRINK, "",     BF_MEMBER) \
+     F(B_PUSH,             "push",             2,  2,   "e",  "r", BR_GROWABLE,    "push into",   BF_MEMBER | BF_WRITE) \
+diff --git a/src/codegen.h b/src/codegen.h
+index fec8c3e..0be9bc0 100644
+--- a/src/codegen.h
++++ b/src/codegen.h
+@@ -1469,7 +1469,7 @@ struct CodeGen {
+     void EmitSpec(FnSpec *sp, bool er = false);
+     // The instruction-set levels above the baseline a simd function has a
+     // version for; runtime.h names them (GS_SIMD_TARGET1, ...).
+-    static constexpr int SIMD_LEVELS = 2;
++    static constexpr int SIMD_LEVELS = 3;
+     void EmitSimdVersions(FnSpec *sp, const string &name, const string &params,
+                           const string &fnbody);
+ 
+diff --git a/src/codegen_builtins.h b/src/codegen_builtins.h
+index f3e9b23..5c66afb 100644
+--- a/src/codegen_builtins.h
++++ b/src/codegen_builtins.h
+@@ -132,6 +132,51 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+             return { tv };
+         }
+         case B_HARDWARE_THREADS: return { "gs_hardware_threads()" };
++        case B_DOT_QUADS_I: {
++            auto at = an[0]->exprtype;
++            auto a = LoadLoc(GenLoc(an[0]), at, ln);
++            auto b = LoadLoc(GenLoc(an[1]), an[1]->exprtype, ln);
++            auto acc = LoadLoc(GenLoc(an[2]), an[2]->exprtype, ln);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            L(at->arr->sub->intstorage == IS_U8 ? "gs_dot_quads_i(" : "gs_dot_quads_i_i8(", tv, ".e, (", a, ").e, (", b,
++              ").e, (", acc, ").e);");
++            return { tv };
++        }
++        case B_DOT_QUADS_S: case B_MADD16: case B_DOT_BYTES: {
++            auto at = an[0]->exprtype;
++            auto a = LoadLoc(GenLoc(an[0]), at, ln);
++            auto b = LoadLoc(GenLoc(an[1]), an[1]->exprtype, ln);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            if (c->builtin == B_DOT_BYTES && an.size() > 2) {
++                auto acc = LoadLoc(GenLoc(an[2]), an[2]->exprtype, ln);
++                L("gs_dot_bytes_acc(", tv, ".e, (", a, ").e, (", b, ").e, (", acc, ").e);");
++                return { tv };
++            }
++            if (c->builtin == B_MADD16 || c->builtin == B_DOT_BYTES) {
++                L(c->builtin == B_MADD16 ? "gs_madd16(" : "gs_dot_bytes(", tv, ".e, (", a, ").e, (", b, ").e);");
++                return { tv };
++            }
++            auto sc = LoadLoc(GenLoc(an[2]), an[2]->exprtype, ln);
++            L(at->arr->sub->intstorage == IS_U8 ? "gs_dot_quads_s(" : "gs_dot_quads_s_i8(", tv, ".e, (", a, ").e, (", b,
++              ").e, (", sc, ").e);");
++            return { tv };
++        }
++        case B_DOT_LANES: case B_DOT_QUADS: {
++            // runtime.h's gs_dot_lanes_*: the version GS_VLEVEL names, so
++            // a simd fn's AVX2 and AVX-512 bodies get the vector one.
++            auto at = an[0]->exprtype;
++            auto bt = an[1]->exprtype;
++            auto a = LoadLoc(GenLoc(an[0]), at, ln);
++            auto b = LoadLoc(GenLoc(an[1]), bt, ln);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            L(c->builtin == B_DOT_QUADS ? (at->arr->sub->intstorage == IS_U8 ? "gs_dot_quads(" : "gs_dot_quads_i8(") :
++              at->arr->sub->intstorage == IS_U8 ? "gs_dot_lanes_u8(" : "gs_dot_lanes_i8(", tv,
++              ".e, (", a, ").e, (", b, ").e);");
++            return { tv };
++        }
+         case B_EMBED_SHADER:
+         case B_EMBED_FILE: {
+             auto &blob = *c->shaderblob;
+@@ -247,7 +292,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+                 L(cnt, " = *(gs_i64 *)(", nn, " + 1);");
+                 L("GS_MEMCPY(", Top(stk), ", ", image, ", (size_t)", n, ");");
+                 Bump(stk, n);
+-                L("free(", nn, ");");
++                L("gs_qrelease(&", q, ", ", nn, ");");
+                 ind--;
+                 L("}");
+                 return poll ? vector<string> { hv, got } : vector<string> { hv };
+@@ -267,7 +312,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+                 ind++;
+                 L("GS_MEMCPY(", Top(stk), ", ", nn, " + 1, (size_t)", nn, "->size);");
+                 Bump(stk, cat(nn, "->size"));
+-                L("free(", nn, ");");
++                L("gs_qrelease(&", q, ", ", nn, ");");
+                 ind--;
+                 if (poll) {
+                     // A missed poll still yields a valid (zero) value.
+@@ -286,19 +331,28 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+                 // A value of no bytes (§3.4): the node holds none to fill the
+                 // object C gives it.
+                 L("GS_MEMZERO(&", tv, ", sizeof(", tv, "));");
+-                L("free(", nn, ");");
++                L("gs_qrelease(&", q, ", ", nn, ");");
+             } else if (poll) {
+                 L("GS_MEMZERO(&", tv, ", sizeof(", tv, "));");
+                 L("if (", nn, ") { GS_MEMCPY(&", tv, ", ", nn, " + 1, sizeof(", tv,
+-                  ")); free(", nn, "); }");
++                  ")); gs_qrelease(&", q, ", ", nn, "); }");
+             } else {
+                 L("GS_MEMCPY(&", tv, ", ", nn, " + 1, sizeof(", tv, "));");
+-                L("free(", nn, ");");
++                L("gs_qrelease(&", q, ", ", nn, ");");
+             }
+             return poll ? vector<string> { tv, got } : vector<string> { tv };
+         }
+         case B_PUSH: return EmitPush(an, ln);
+         case B_APPEND: EmitAppend(an, ln); return {};
++        case B_PREFETCH: {
++            // a.prefetch(i, n): a hint, clamped to the elements there are.
++            auto lv = RecvLoc(an[0]);
++            auto v = ArrayView(lv);
++            auto i = GenX(an[1]);
++            auto n = GenX(an[2]);
++            L("gs_prefetch(", v.elems, ", ", v.len, ", ", FixedSize(v.elem), ", ", i, ", ", n, ");");
++            return {};
++        }
+         case B_INDEX_OF: {
+             // The checker proved the reference is an element of this very
+             // array (§3.3), so the distance is a whole number of elements
+diff --git a/src/codegen_emit.h b/src/codegen_emit.h
+index 107607b..be24ffa 100644
+--- a/src/codegen_emit.h
++++ b/src/codegen_emit.h
+@@ -581,13 +581,15 @@ inline void CodeGen::EmitSimdVersions(FnSpec *sp, const string &name, const stri
+     auto ret = SigRet(sp);
+     vector<string> versions(SIMD_LEVELS + 1);
+     // Every version above the baseline has FMA, so math's mul_add fuses in
+-    // it whatever the target's mode (runtime.h).
++    // it whatever the target's mode, and dot_lanes takes the version's
++    // vector form (GS_VLEVEL, runtime.h).
+     for (int lv = SIMD_LEVELS; lv >= 1; lv--) {
+         versions[lv] = Unique(cat(name, "_simd", lv));
+-        Append(code, "#if GS_SIMD >= ", lv,
++        Append(code, "#if GS_SIMD >= ", lv, "\n#undef GS_VLEVEL\n#define GS_VLEVEL ", lv,
+                "\n#undef GS_MUL_ADD_MODE\n#define GS_MUL_ADD_MODE fused\nGS_SIMD_TARGET", lv,
+                " static ", ret, " ", versions[lv], "(", params, ") {\n", fnbody,
+-               "}\n#undef GS_MUL_ADD_MODE\n#define GS_MUL_ADD_MODE GS_MUL_ADD_BASE\n#endif\n");
++               "}\n#undef GS_VLEVEL\n#define GS_VLEVEL GS_VLEVEL_BASE\n"
++               "#undef GS_MUL_ADD_MODE\n#define GS_MUL_ADD_MODE GS_MUL_ADD_BASE\n#endif\n");
+     }
+     Append(code, "static ", ret, " ", name, "(", params, ") {\n",
+            "#if GS_SIMD >= 1\n    switch (gs_simd_level()) {\n");
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 892ab96..c065cfa 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -307,7 +307,7 @@ typedef float gs_vf32_16 __attribute__((vector_size(64), aligned(1), may_alias))
+ 
+ #if defined(__clang__) && (defined(__x86_64__) || defined(_M_X64)) && !defined(__TINYC__)
+ #ifndef GS_SIMD
+-#define GS_SIMD 2
++#define GS_SIMD 3
+ #endif
+ #else
+ #undef GS_SIMD
+@@ -315,20 +315,21 @@ typedef float gs_vf32_16 __attribute__((vector_size(64), aligned(1), may_alias))
+ #endif
+ #if GS_SIMD >= 1
+ #define GS_SIMD_TARGET1 __attribute__((target("avx2,fma,bmi,bmi2,lzcnt,popcnt")))
+-#define GS_SIMD_TARGET2 \
++#define GS_SIMD_TARGET2 __attribute__((target("avxvnni,avx2,fma,bmi,bmi2,lzcnt,popcnt")))
++#define GS_SIMD_TARGET3 \
+     __attribute__((target("avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,fma,bmi,bmi2,lzcnt,popcnt")))
+ 
+-static inline void gs_cpuid(uint32_t leaf, uint32_t r[4]) {
+-    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(0));
++static inline void gs_cpuid(uint32_t leaf, uint32_t r[4], uint32_t sub) {
++    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+ }
+ 
+ /* The highest level both the CPU and the operating system support (the OS
+    has to save the wider registers: XGETBV's XCR0), capped at GS_SIMD. */
+ static inline int gs_simd_detect(void) {
+     uint32_t r[4], b7, xcr0, xhi;
+-    gs_cpuid(0, r);
++    gs_cpuid(0, r, 0);
+     if (r[0] < 7) return 0;
+-    gs_cpuid(1, r);
++    gs_cpuid(1, r, 0);
+     /* OSXSAVE, AVX, POPCNT, FMA. */
+     if ((r[2] & (1u << 27 | 1u << 28 | 1u << 23 | 1u << 12)) !=
+         (1u << 27 | 1u << 28 | 1u << 23 | 1u << 12))
+@@ -336,20 +337,26 @@ static inline int gs_simd_detect(void) {
+     __asm__ volatile("xgetbv" : "=a"(xcr0), "=d"(xhi) : "c"(0));
+     (void)xhi;
+     if ((xcr0 & 0x6) != 0x6) return 0;                  /* XMM and YMM state. */
+-    gs_cpuid(7, r);
++    gs_cpuid(7, r, 0);
+     b7 = r[1];
++    uint32_t s7 = r[0];
+     if ((b7 & (1u << 5 | 1u << 3 | 1u << 8)) != (1u << 5 | 1u << 3 | 1u << 8))
+         return 0;                                       /* AVX2, BMI1, BMI2. */
+-    gs_cpuid(0x80000000u, r);
++    gs_cpuid(0x80000000u, r, 0);
+     if (r[0] < 0x80000001u) return 0;
+-    gs_cpuid(0x80000001u, r);
++    gs_cpuid(0x80000001u, r, 0);
+     if (!(r[2] & (1u << 5))) return 0;                  /* LZCNT. */
+-    if (GS_SIMD < 2 || (xcr0 & 0xe0) != 0xe0) return 1; /* Opmask and ZMM state. */
++    int lv = 1;
++    if (GS_SIMD >= 2 && s7 >= 1) {
++        gs_cpuid(7, r, 1);
++        if (r[0] & (1u << 4)) lv = 2;                   /* AVX-VNNI. */
++    }
++    if (GS_SIMD < 3 || (xcr0 & 0xe0) != 0xe0) return lv; /* Opmask and ZMM state. */
+     /* AVX512F, DQ, CD, BW, VL. */
+     if ((b7 & (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31)) !=
+         (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31))
+-        return 1;
+-    return 2;
++        return lv;
++    return 3;
+ }
+ 
+ /* Detected at the first call and kept. Every thread computes the same
+@@ -384,6 +391,252 @@ static inline int gs_simd_level(void) {
+ #endif
+ #define GS_MUL_ADD_MODE GS_MUL_ADD_BASE
+ 
++/* The dot_lanes builtin (§12): lane k of the f32[8] is a[2k]*b[2k] +
++   a[2k+1]*b[2k+1] + a[16+2k]*b[16+2k] + a[17+2k]*b[17+2k], summed exactly
++   as integers and converted once, so every version gives the same lanes.
++   GS_VLEVEL is the simd level of the code a call is in: the compiler sets
++   it around a simd function's AVX2 and AVX-512 versions (EmitSimdVersions)
++   as it does GS_MUL_ADD_MODE, and those take the AVX2 form, two sign or
++   zero extensions and a multiply-add per operand half. Code built for AVX2
++   as a whole takes it everywhere. */
++#if defined(__AVX2__) && !defined(__TINYC__)
++#define GS_VLEVEL_BASE 1
++#else
++#define GS_VLEVEL_BASE 0
++#endif
++#define GS_VLEVEL GS_VLEVEL_BASE
++#if (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
++#define gs_prefetch_line(p) __builtin_prefetch((p), 0, 3)
++#else
++#define gs_prefetch_line(p) ((void)(p))
++#endif
++static inline void gs_prefetch(const void *p, int64_t len, int64_t esz, int64_t i, int64_t n) {
++    if (i < 0) { n += i; i = 0; }
++    if (n > len - i) n = len - i;
++    if (n <= 0 || esz <= 0) return;
++    const char *b = (const char *)p + i * esz;
++    for (int64_t o = 0; o < n * esz; o += 64) gs_prefetch_line(b + o);
++}
++#define GS_VL_CAT2(a, b) a##b
++#define GS_VL_CAT(a, b) GS_VL_CAT2(a, b)
++static inline void gs_dot_lanes_i8_0(float *r, const int8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (float)(a[2 * k] * b[2 * k] + a[2 * k + 1] * b[2 * k + 1] +
++                       a[16 + 2 * k] * b[16 + 2 * k] + a[17 + 2 * k] * b[17 + 2 * k]);
++}
++/* dot_quads: lane k is the sum over j = 4k..4k+3 of min(a[j], 127) * b[j].
++   The cap keeps every pair of products inside AVX2's saturating 16-bit
++   multiply-add, so its four instructions are exact and give the loop's lanes. */
++static inline void gs_dot_quads_0(float *r, const uint8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++) s += (a[j] < 127 ? a[j] : 127) * b[j];
++        r[k] = (float)s;
++    }
++}
++static inline void gs_dot_quads_i8_0(float *r, const int8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++)
++            s += (a[j] < -127 ? -127 : a[j]) * (b[j] < -127 ? -127 : b[j]);
++        r[k] = (float)s;
++    }
++}
++static inline void gs_dot_quads_s_0(int32_t *r, const uint8_t *a, const int8_t *b, const int16_t *s) {
++    for (int k = 0; k < 8; k++) {
++        int p[2];
++        for (int h = 0; h < 2; h++) {
++            int j = 4 * k + 2 * h;
++            p[h] = (a[j] < 127 ? a[j] : 127) * b[j] + (a[j + 1] < 127 ? a[j + 1] : 127) * b[j + 1];
++        }
++        r[k] = p[0] * s[2 * k] + p[1] * s[2 * k + 1];
++    }
++}
++static inline void gs_dot_quads_s_i8_0(int32_t *r, const int8_t *a, const int8_t *b, const int16_t *s) {
++    for (int k = 0; k < 8; k++) {
++        int p[2];
++        for (int h = 0; h < 2; h++) {
++            int j = 4 * k + 2 * h;
++            p[h] = (a[j] < -127 ? -127 : a[j]) * (b[j] < -127 ? -127 : b[j]) +
++                   (a[j + 1] < -127 ? -127 : a[j + 1]) * (b[j + 1] < -127 ? -127 : b[j + 1]);
++        }
++        r[k] = p[0] * s[2 * k] + p[1] * s[2 * k + 1];
++    }
++}
++static inline void gs_dot_bytes_0(int32_t *r, const uint8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = a[4 * k] * b[4 * k] + a[4 * k + 1] * b[4 * k + 1] + a[4 * k + 2] * b[4 * k + 2] + a[4 * k + 3] * b[4 * k + 3];
++}
++static inline void gs_dot_bytes_acc_0(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (int32_t)((uint32_t)c[k] + (uint32_t)(a[4 * k] * b[4 * k] + a[4 * k + 1] * b[4 * k + 1] +
++                                                     a[4 * k + 2] * b[4 * k + 2] + a[4 * k + 3] * b[4 * k + 3]));
++}
++static inline void gs_dot_quads_i_0(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++) s += (a[j] < 127 ? a[j] : 127) * b[j];
++        r[k] = (int32_t)((uint32_t)c[k] + (uint32_t)s);
++    }
++}
++static inline void gs_dot_quads_i_i8_0(int32_t *r, const int8_t *a, const int8_t *b, const int32_t *c) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++)
++            s += (a[j] < -127 ? -127 : a[j]) * (b[j] < -127 ? -127 : b[j]);
++        r[k] = (int32_t)((uint32_t)c[k] + (uint32_t)s);
++    }
++}
++static inline void gs_madd16_0(int32_t *r, const int16_t *a, const int16_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (int32_t)(uint32_t)((int64_t)a[2 * k] * b[2 * k] + (int64_t)a[2 * k + 1] * b[2 * k + 1]);
++}
++static inline void gs_dot_lanes_u8_0(float *r, const uint8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (float)(a[2 * k] * b[2 * k] + a[2 * k + 1] * b[2 * k + 1] +
++                       a[16 + 2 * k] * b[16 + 2 * k] + a[17 + 2 * k] * b[17 + 2 * k]);
++}
++#if GS_SIMD >= 1 || GS_VLEVEL_BASE >= 1
++#include <immintrin.h>
++#if defined(_MSC_VER) && !defined(__clang__)
++#define GS_VL_FN static __forceinline
++#elif GS_VLEVEL_BASE >= 1
++#define GS_VL_FN static inline __attribute__((always_inline))
++#else
++#define GS_VL_FN static inline __attribute__((always_inline, target("avx2")))
++#endif
++GS_VL_FN void gs_dot_lanes_i8_1(float *r, const int8_t *a, const int8_t *b) {
++    __m256i a0 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)a));
++    __m256i a1 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(a + 16)));
++    __m256i b0 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)b));
++    __m256i b1 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(b + 16)));
++    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(a0, b0), _mm256_madd_epi16(a1, b1));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(s));
++}
++GS_VL_FN void gs_dot_lanes_u8_1(float *r, const uint8_t *a, const int8_t *b) {
++    __m256i a0 = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i *)a));
++    __m256i a1 = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i *)(a + 16)));
++    __m256i b0 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)b));
++    __m256i b1 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(b + 16)));
++    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(a0, b0), _mm256_madd_epi16(a1, b1));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(s));
++}
++GS_VL_FN void gs_dot_quads_1(float *r, const uint8_t *a, const int8_t *b) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    __m256i p = _mm256_maddubs_epi16(u, _mm256_loadu_si256((const __m256i *)b));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_madd_epi16(p, _mm256_set1_epi16(1))));
++}
++GS_VL_FN void gs_dot_quads_i8_1(float *r, const int8_t *a, const int8_t *b) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    __m256i p = _mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_madd_epi16(p, _mm256_set1_epi16(1))));
++}
++GS_VL_FN void gs_dot_quads_s_1(int32_t *r, const uint8_t *a, const int8_t *b, const int16_t *s) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    __m256i p = _mm256_maddubs_epi16(u, _mm256_loadu_si256((const __m256i *)b));
++    _mm256_storeu_si256((__m256i *)r, _mm256_madd_epi16(p, _mm256_loadu_si256((const __m256i *)s)));
++}
++GS_VL_FN void gs_dot_quads_s_i8_1(int32_t *r, const int8_t *a, const int8_t *b, const int16_t *s) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    __m256i p = _mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x));
++    _mm256_storeu_si256((__m256i *)r, _mm256_madd_epi16(p, _mm256_loadu_si256((const __m256i *)s)));
++}
++GS_VL_FN void gs_madd16_1(int32_t *r, const int16_t *a, const int16_t *b) {
++    _mm256_storeu_si256((__m256i *)r, _mm256_madd_epi16(_mm256_loadu_si256((const __m256i *)a), _mm256_loadu_si256((const __m256i *)b)));
++}
++/* dot_bytes without VNNI: a's low seven bits and its top bit as two exact
++   byte multiply-adds, the second weighted 128. */
++GS_VL_FN void gs_dot_bytes_1(int32_t *r, const uint8_t *a, const int8_t *b) {
++    __m256i x = _mm256_loadu_si256((const __m256i *)a);
++    __m256i y = _mm256_loadu_si256((const __m256i *)b);
++    __m256i l = _mm256_maddubs_epi16(_mm256_and_si256(x, _mm256_set1_epi8(127)), y);
++    __m256i h = _mm256_maddubs_epi16(_mm256_and_si256(_mm256_srli_epi16(x, 7), _mm256_set1_epi8(1)), y);
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(_mm256_madd_epi16(l, _mm256_set1_epi16(1)),
++                                                       _mm256_madd_epi16(h, _mm256_set1_epi16(128))));
++}
++GS_VL_FN void gs_dot_quads_i_1(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    __m256i p = _mm256_madd_epi16(_mm256_maddubs_epi16(u, _mm256_loadu_si256((const __m256i *)b)), _mm256_set1_epi16(1));
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(p, _mm256_loadu_si256((const __m256i *)c)));
++}
++GS_VL_FN void gs_dot_quads_i_i8_1(int32_t *r, const int8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    __m256i p = _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x)), _mm256_set1_epi16(1));
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(p, _mm256_loadu_si256((const __m256i *)c)));
++}
++GS_VL_FN void gs_dot_bytes_acc_1(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    gs_dot_bytes_1(r, a, b);
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(_mm256_loadu_si256((const __m256i *)r), _mm256_loadu_si256((const __m256i *)c)));
++}
++#if GS_SIMD >= 2
++/* Level 2 adds AVX-VNNI: vpdpbusd sums four u8*i8 products into each i32
++   lane without the 16-bit saturation, so the capped or clamped operands of
++   the other levels give the same lanes in one instruction. */
++#define GS_VL_FN2 static inline __attribute__((always_inline, target("avxvnni,avx2")))
++GS_VL_FN2 void gs_dot_bytes_2(int32_t *r, const uint8_t *a, const int8_t *b) {
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_loadu_si256((const __m256i *)a),
++                                                              _mm256_loadu_si256((const __m256i *)b)));
++}
++GS_VL_FN2 void gs_dot_bytes_acc_2(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_loadu_si256((const __m256i *)c), _mm256_loadu_si256((const __m256i *)a),
++                                                              _mm256_loadu_si256((const __m256i *)b)));
++}
++GS_VL_FN2 void gs_dot_quads_i_2(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_loadu_si256((const __m256i *)c), u, _mm256_loadu_si256((const __m256i *)b)));
++}
++GS_VL_FN2 void gs_dot_quads_i_i8_2(int32_t *r, const int8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_loadu_si256((const __m256i *)c), _mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x)));
++}
++GS_VL_FN2 void gs_dot_quads_2(float *r, const uint8_t *a, const int8_t *b) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), u, _mm256_loadu_si256((const __m256i *)b))));
++}
++GS_VL_FN2 void gs_dot_quads_i8_2(float *r, const int8_t *a, const int8_t *b) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x))));
++}
++#define gs_dot_quads_s_2 gs_dot_quads_s_1
++#define gs_dot_quads_s_i8_2 gs_dot_quads_s_i8_1
++#define gs_madd16_2 gs_madd16_1
++#define gs_dot_lanes_i8_2 gs_dot_lanes_i8_1
++#define gs_dot_lanes_u8_2 gs_dot_lanes_u8_1
++#endif
++#define gs_dot_bytes_3 gs_dot_bytes_1
++#define gs_dot_quads_i_3 gs_dot_quads_i_1
++#define gs_dot_quads_i_i8_3 gs_dot_quads_i_i8_1
++#define gs_dot_bytes_acc_3 gs_dot_bytes_acc_1
++#define gs_dot_quads_s_3 gs_dot_quads_s_1
++#define gs_dot_quads_s_i8_3 gs_dot_quads_s_i8_1
++#define gs_madd16_3 gs_madd16_1
++#define gs_dot_quads_3 gs_dot_quads_1
++#define gs_dot_quads_i8_3 gs_dot_quads_i8_1
++#define gs_dot_lanes_i8_3 gs_dot_lanes_i8_1
++#define gs_dot_lanes_u8_3 gs_dot_lanes_u8_1
++#endif
++#define gs_dot_lanes_i8(r, a, b) GS_VL_CAT(gs_dot_lanes_i8_, GS_VLEVEL)(r, a, b)
++#define gs_dot_lanes_u8(r, a, b) GS_VL_CAT(gs_dot_lanes_u8_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads(r, a, b) GS_VL_CAT(gs_dot_quads_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads_i8(r, a, b) GS_VL_CAT(gs_dot_quads_i8_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads_s(r, a, b, s) GS_VL_CAT(gs_dot_quads_s_, GS_VLEVEL)(r, a, b, s)
++#define gs_dot_quads_s_i8(r, a, b, s) GS_VL_CAT(gs_dot_quads_s_i8_, GS_VLEVEL)(r, a, b, s)
++#define gs_madd16(r, a, b) GS_VL_CAT(gs_madd16_, GS_VLEVEL)(r, a, b)
++#define gs_dot_bytes(r, a, b) GS_VL_CAT(gs_dot_bytes_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads_i(r, a, b, c) GS_VL_CAT(gs_dot_quads_i_, GS_VLEVEL)(r, a, b, c)
++#define gs_dot_quads_i_i8(r, a, b, c) GS_VL_CAT(gs_dot_quads_i_i8_, GS_VLEVEL)(r, a, b, c)
++#define gs_dot_bytes_acc(r, a, b, c) GS_VL_CAT(gs_dot_bytes_acc_, GS_VLEVEL)(r, a, b, c)
++
+ /* The generated code's memcpy and memset of zeros. Most move or clear the
+    1 to 32 bytes of a field, an element or a reference, a constant size the
+    optimizing backends turn into a few moves. TinyCC calls the C library for
+@@ -986,6 +1239,7 @@ GS_API void gs_free_msg(uint8_t *msg);
+ typedef struct gs_qnode {
+     struct gs_qnode *next;
+     int64_t size;
++    int64_t cap;                     /* Bytes the node can hold (gs_qrelease). */
+     /* Value bytes follow the header. */
+ } gs_qnode;
+ 
+@@ -997,6 +1251,7 @@ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
+ GS_API gs_qnode *gs_qget(gs_queue *q);
+ GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms);
+ GS_API gs_qnode *gs_qpoll(gs_queue *q);
++GS_API void gs_qrelease(gs_queue *q, gs_qnode *n);
+ GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line);
+ /* Frees a queue and the messages left in it, once no thread program can
+    use it (goose_exit); gs_qinit makes it again. */
+diff --git a/src/runtime/runtime_ext.h b/src/runtime/runtime_ext.h
+index 726cc54..248b5a7 100644
+--- a/src/runtime/runtime_ext.h
++++ b/src/runtime/runtime_ext.h
+@@ -108,6 +108,28 @@ static float gs_mul_addf(float x, float y, float z) {
+ #define gs_mul_add(x, y, z) GS_MUL_ADD_CAT(gs_mul_add_, GS_MUL_ADD_MODE)(x, y, z)
+ #define gs_mul_addf(x, y, z) GS_MUL_ADD_CAT(gs_mul_addf_, GS_MUL_ADD_MODE)(x, y, z)
+ 
++/* math's round_even: the nearest integer, ties to even, which is C's rint in
++   the default rounding mode, the only one Goose runs in. Inline, so a loop
++   of them vectorizes (one vroundps in a simd function's versions); where
++   there is no builtin, adding and taking away 2^52 or 2^23 rounds the same. */
++#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
++static inline __attribute__((always_inline)) double gs_round_even(double x) { return __builtin_rint(x); }
++static inline __attribute__((always_inline)) float gs_round_evenf(float x) { return __builtin_rintf(x); }
++#else
++static inline double gs_round_even(double x) {
++    double a = x < 0 ? -x : x;
++    if (!(a < 4503599627370496.0)) return x;
++    double r = (a + 4503599627370496.0) - 4503599627370496.0;
++    return x < 0 ? -r : x > 0 ? r : x;
++}
++static inline float gs_round_evenf(float x) {
++    float a = x < 0 ? -x : x;
++    if (!(a < 8388608.0f)) return x;
++    float r = (a + 8388608.0f) - 8388608.0f;
++    return x < 0 ? -r : x > 0 ? r : x;
++}
++#endif
++
+ /* math's other libm functions (stdlib/math.goose). C has them set errno on a
+    domain or range error, so a C compiler takes each call for a write to
+    memory: a loop around one loads again after it whatever it had hoisted
+@@ -232,6 +254,8 @@ GS_API void gs_os_arg(int64_t i, gs_rref out);
+ GS_API uint8_t gs_os_getenv(sl_u8 name, gs_rref out);
+ GS_API uint8_t gs_os_resource_dir(gs_rref out);
+ GS_API int64_t gs_os_time_ns(void);
++GS_API void gs_qspin_set(int64_t n);
++GS_API uint8_t gs_os_pin_thread(int64_t cpu);
+ GS_API int64_t gs_os_clock_ns(void);
+ GS_API void gs_os_sleep_ms(int64_t ms);
+ GS_API uint64_t gs_os_random_u64(void);
+diff --git a/src/runtime/runtime_os.h b/src/runtime/runtime_os.h
+index 22c89e6..8737ccf 100644
+--- a/src/runtime/runtime_os.h
++++ b/src/runtime/runtime_os.h
+@@ -709,6 +709,28 @@ GS_API int64_t gs_os_clock_ns(void) {
+ #endif
+ }
+ 
++/* os's pin_thread: binds the calling thread to logical CPU `cpu`, numbered
++   as the OS numbers them, so a worker pool can put one thread on each core
++   it chooses. true if the OS took it: on Windows the first 64 CPUs of the
++   thread's processor group, on Linux any the process may run on (the
++   system call itself, as gs_os_threads asks it); false elsewhere. */
++GS_API uint8_t gs_os_pin_thread(int64_t cpu) {
++    if (cpu < 0) return 0;
++#ifdef _WIN32
++    if (cpu >= 64) return 0;
++    return SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << cpu) != 0;
++#elif defined(__linux__)
++    unsigned long mask[1024 / (8 * sizeof(unsigned long))];
++    const int64_t bits = (int64_t)(8 * sizeof(unsigned long));
++    if (cpu >= (int64_t)(sizeof mask * 8)) return 0;
++    memset(mask, 0, sizeof mask);
++    mask[cpu / bits] |= 1UL << (cpu % bits);
++    return syscall(SYS_sched_setaffinity, 0, sizeof mask, mask) == 0;
++#else
++    return 0;
++#endif
++}
++
+ GS_API void gs_os_sleep_ms(int64_t ms) {
+     if (ms <= 0) return;
+ #ifdef _WIN32
+diff --git a/src/runtime/runtime_threads.h b/src/runtime/runtime_threads.h
+index d6a2bce..a910767 100644
+--- a/src/runtime/runtime_threads.h
++++ b/src/runtime/runtime_threads.h
+@@ -313,9 +313,42 @@ GS_API void gs_free_msg(uint8_t *msg) {
+ /* ---------------------------------------------------------------------------
+    Typed queues (runtime.h). A queue holds at most `limit` messages. */
+ 
++/* A receive that finds its queue empty first watches the count, unlocked,
++   for this many pause instructions before it sleeps on the condition
++   variable: a worker pool that hands a job back within microseconds skips
++   the wakeup (os's queue_spin, or GS_QSPIN in the environment; 0 by
++   default, which sleeps at once). The count is only a hint here: the lock
++   decides, as before. */
++static int64_t gs_qspin_n = -1;
++GS_API void gs_qspin_set(int64_t n) { gs_qspin_n = n < 0 ? 0 : n; }
++static int64_t gs_qspins(void) {
++    int64_t n = gs_qspin_n;
++    if (n < 0) {
++        const char *e = getenv("GS_QSPIN");
++        n = e ? strtoll(e, NULL, 10) : 0;
++        gs_qspin_n = n = n < 0 ? 0 : n;
++    }
++    return n;
++}
++#if defined(_MSC_VER) && !defined(__clang__)
++#define gs_cpu_pause() YieldProcessor()
++#elif defined(__x86_64__) || defined(__i386__)
++#define gs_cpu_pause() __asm__ __volatile__("pause")
++#elif defined(__aarch64__)
++#define gs_cpu_pause() __asm__ __volatile__("yield")
++#else
++#define gs_cpu_pause() ((void)0)
++#endif
++#define gs_qready(s) (*(volatile int64_t *)&(s)->count > 0)
++
+ struct gs_qstate {
+     gs_qnode *head, *tail;
+     int64_t count, limit;
++    /* Taken nodes come back here (gs_qrelease) for the next put, so a busy
++       queue stops calling malloc and free, whose heap lock its threads
++       would otherwise share. */
++    gs_qnode *spare;
++    int64_t nspare;
+     gs_mutex mutex;
+     gs_cond cond;
+ };
+@@ -356,6 +389,8 @@ GS_API void gs_qinit(gs_queue *q) {
+     s->head = s->tail = NULL;
+     s->count = 0;
+     s->limit = INT64_MAX;
++    s->spare = NULL;
++    s->nspare = 0;
+     gs_mutex_init(&s->mutex);
+     #if defined(_WIN32) || defined(__APPLE__)
+         gs_cond_init(&s->cond);
+@@ -374,8 +409,21 @@ GS_API void gs_qinit(gs_queue *q) {
+    to check the limit and link the node. */
+ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size) {
+     struct gs_qstate *s = *q;
+-    gs_qnode *n = (gs_qnode *)malloc(sizeof(gs_qnode) + (size_t)size);
+-    if (!n) gs_panic("out of memory in qput");
++    gs_qnode *n = NULL;
++    if (*(gs_qnode *volatile *)&s->spare) {
++        gs_mutex_lock(&s->mutex);
++        if (s->spare && s->spare->cap >= size) {
++            n = s->spare;
++            s->spare = n->next;
++            s->nspare--;
++        }
++        gs_mutex_unlock(&s->mutex);
++    }
++    if (!n) {
++        n = (gs_qnode *)malloc(sizeof(gs_qnode) + (size_t)size);
++        if (!n) gs_panic("out of memory in qput");
++        n->cap = size;
++    }
+     n->next = NULL;
+     n->size = size;
+     memcpy(n + 1, data, (size_t)size);
+@@ -404,6 +452,7 @@ static gs_qnode *gs_qtake(struct gs_qstate *s) {
+ 
+ GS_API gs_qnode *gs_qget(gs_queue *q) {
+     struct gs_qstate *s = *q;
++    for (int64_t i = gs_qspins(); i > 0 && !gs_qready(s); i--) gs_cpu_pause();
+     gs_mutex_lock(&s->mutex);
+     while (!s->head) gs_cond_wait(&s->cond, &s->mutex);
+     gs_qnode *n = gs_qtake(s);
+@@ -413,6 +462,9 @@ GS_API gs_qnode *gs_qget(gs_queue *q) {
+ 
+ GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
+     struct gs_qstate *s = *q;
++    /* A poll of an empty queue takes no lock, so a loop of them costs its
++       senders nothing. */
++    if (ms <= 0 && !gs_qready(s)) return NULL;
+     /* Caps ms so the deadline in nanoseconds can't overflow. */
+     if (ms > INT64_MAX / 2000000) ms = INT64_MAX / 2000000;
+     int64_t deadline = ms > 0 ? gs_qclock_ns() + ms * 1000000 : 0;
+@@ -426,6 +478,22 @@ GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
+ 
+ GS_API gs_qnode *gs_qpoll(gs_queue *q) { return gs_qwait(q, 0); }
+ 
++/* A taken node, its value copied out: kept for the next put, up to 64 per
++   queue, else freed. */
++GS_API void gs_qrelease(gs_queue *q, gs_qnode *n) {
++    struct gs_qstate *s = *q;
++    if (!n) return;   /* A poll that found nothing hands back no node. */
++    gs_mutex_lock(&s->mutex);
++    if (s->nspare < 64) {
++        n->next = s->spare;
++        s->spare = n;
++        s->nspare++;
++        n = NULL;
++    }
++    gs_mutex_unlock(&s->mutex);
++    free(n);
++}
++
+ GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line) {
+     if (n <= 0) gs_abort(GS_E_QBOUND, file, line);
+     struct gs_qstate *s = *q;
+@@ -439,6 +507,11 @@ GS_API void gs_qfree(gs_queue *q) {
+     struct gs_qstate *s = *q;
+     if (!s) return;
+     while (s->head) free(gs_qtake(s));
++    while (s->spare) {
++        gs_qnode *n = s->spare;
++        s->spare = n->next;
++        free(n);
++    }
+     #ifndef _WIN32
+         pthread_mutex_destroy(&s->mutex);
+         pthread_cond_destroy(&s->cond);
+diff --git a/src/runtime_inline.h b/src/runtime_inline.h
+index 9e3b7a1..1c47531 100644
+--- a/src/runtime_inline.h
++++ b/src/runtime_inline.h
+@@ -343,7 +343,7 @@ typedef float gs_vf32_16 __attribute__((vector_size(64), aligned(1), may_alias))
+ )GSRT"
+ R"GSRT(#if defined(__clang__) && (defined(__x86_64__) || defined(_M_X64)) && !defined(__TINYC__)
+ #ifndef GS_SIMD
+-#define GS_SIMD 2
++#define GS_SIMD 3
+ #endif
+ #else
+ #undef GS_SIMD
+@@ -351,12 +351,13 @@ R"GSRT(#if defined(__clang__) && (defined(__x86_64__) || defined(_M_X64)) && !de
+ #endif
+ #if GS_SIMD >= 1
+ #define GS_SIMD_TARGET1 __attribute__((target("avx2,fma,bmi,bmi2,lzcnt,popcnt")))
+-#define GS_SIMD_TARGET2 \
++#define GS_SIMD_TARGET2 __attribute__((target("avxvnni,avx2,fma,bmi,bmi2,lzcnt,popcnt")))
++#define GS_SIMD_TARGET3 \
+     __attribute__((target("avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,fma,bmi,bmi2,lzcnt,popcnt")))
+ 
+ )GSRT"
+-R"GSRT(static inline void gs_cpuid(uint32_t leaf, uint32_t r[4]) {
+-    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(0));
++R"GSRT(static inline void gs_cpuid(uint32_t leaf, uint32_t r[4], uint32_t sub) {
++    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+ }
+ 
+ )GSRT"
+@@ -364,9 +365,9 @@ R"GSRT(/* The highest level both the CPU and the operating system support (the O
+    has to save the wider registers: XGETBV's XCR0), capped at GS_SIMD. */
+ static inline int gs_simd_detect(void) {
+     uint32_t r[4], b7, xcr0, xhi;
+-    gs_cpuid(0, r);
++    gs_cpuid(0, r, 0);
+     if (r[0] < 7) return 0;
+-    gs_cpuid(1, r);
++    gs_cpuid(1, r, 0);
+     /* OSXSAVE, AVX, POPCNT, FMA. */
+     if ((r[2] & (1u << 27 | 1u << 28 | 1u << 23 | 1u << 12)) !=
+         (1u << 27 | 1u << 28 | 1u << 23 | 1u << 12))
+@@ -374,20 +375,26 @@ static inline int gs_simd_detect(void) {
+     __asm__ volatile("xgetbv" : "=a"(xcr0), "=d"(xhi) : "c"(0));
+     (void)xhi;
+     if ((xcr0 & 0x6) != 0x6) return 0;                  /* XMM and YMM state. */
+-    gs_cpuid(7, r);
++    gs_cpuid(7, r, 0);
+     b7 = r[1];
++    uint32_t s7 = r[0];
+     if ((b7 & (1u << 5 | 1u << 3 | 1u << 8)) != (1u << 5 | 1u << 3 | 1u << 8))
+         return 0;                                       /* AVX2, BMI1, BMI2. */
+-    gs_cpuid(0x80000000u, r);
++    gs_cpuid(0x80000000u, r, 0);
+     if (r[0] < 0x80000001u) return 0;
+-    gs_cpuid(0x80000001u, r);
++    gs_cpuid(0x80000001u, r, 0);
+     if (!(r[2] & (1u << 5))) return 0;                  /* LZCNT. */
+-    if (GS_SIMD < 2 || (xcr0 & 0xe0) != 0xe0) return 1; /* Opmask and ZMM state. */
++    int lv = 1;
++    if (GS_SIMD >= 2 && s7 >= 1) {
++        gs_cpuid(7, r, 1);
++        if (r[0] & (1u << 4)) lv = 2;                   /* AVX-VNNI. */
++    }
++    if (GS_SIMD < 3 || (xcr0 & 0xe0) != 0xe0) return lv; /* Opmask and ZMM state. */
+     /* AVX512F, DQ, CD, BW, VL. */
+     if ((b7 & (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31)) !=
+         (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31))
+-        return 1;
+-    return 2;
++        return lv;
++    return 3;
+ }
+ 
+ )GSRT"
+@@ -424,6 +431,254 @@ R"GSRT(/* math's mul_add (runtime_ext.h): x * y + z, rounded once where the code
+ #endif
+ #define GS_MUL_ADD_MODE GS_MUL_ADD_BASE
+ 
++)GSRT"
++R"GSRT(/* The dot_lanes builtin (§12): lane k of the f32[8] is a[2k]*b[2k] +
++   a[2k+1]*b[2k+1] + a[16+2k]*b[16+2k] + a[17+2k]*b[17+2k], summed exactly
++   as integers and converted once, so every version gives the same lanes.
++   GS_VLEVEL is the simd level of the code a call is in: the compiler sets
++   it around a simd function's AVX2 and AVX-512 versions (EmitSimdVersions)
++   as it does GS_MUL_ADD_MODE, and those take the AVX2 form, two sign or
++   zero extensions and a multiply-add per operand half. Code built for AVX2
++   as a whole takes it everywhere. */
++#if defined(__AVX2__) && !defined(__TINYC__)
++#define GS_VLEVEL_BASE 1
++#else
++#define GS_VLEVEL_BASE 0
++#endif
++#define GS_VLEVEL GS_VLEVEL_BASE
++#if (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
++#define gs_prefetch_line(p) __builtin_prefetch((p), 0, 3)
++#else
++#define gs_prefetch_line(p) ((void)(p))
++#endif
++static inline void gs_prefetch(const void *p, int64_t len, int64_t esz, int64_t i, int64_t n) {
++    if (i < 0) { n += i; i = 0; }
++    if (n > len - i) n = len - i;
++    if (n <= 0 || esz <= 0) return;
++    const char *b = (const char *)p + i * esz;
++    for (int64_t o = 0; o < n * esz; o += 64) gs_prefetch_line(b + o);
++}
++#define GS_VL_CAT2(a, b) a##b
++#define GS_VL_CAT(a, b) GS_VL_CAT2(a, b)
++static inline void gs_dot_lanes_i8_0(float *r, const int8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (float)(a[2 * k] * b[2 * k] + a[2 * k + 1] * b[2 * k + 1] +
++                       a[16 + 2 * k] * b[16 + 2 * k] + a[17 + 2 * k] * b[17 + 2 * k]);
++}
++/* dot_quads: lane k is the sum over j = 4k..4k+3 of min(a[j], 127) * b[j].
++   The cap keeps every pair of products inside AVX2's saturating 16-bit
++   multiply-add, so its four instructions are exact and give the loop's lanes. */
++static inline void gs_dot_quads_0(float *r, const uint8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++) s += (a[j] < 127 ? a[j] : 127) * b[j];
++        r[k] = (float)s;
++    }
++}
++static inline void gs_dot_quads_i8_0(float *r, const int8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++)
++            s += (a[j] < -127 ? -127 : a[j]) * (b[j] < -127 ? -127 : b[j]);
++        r[k] = (float)s;
++    }
++}
++static inline void gs_dot_quads_s_0(int32_t *r, const uint8_t *a, const int8_t *b, const int16_t *s) {
++    for (int k = 0; k < 8; k++) {
++        int p[2];
++        for (int h = 0; h < 2; h++) {
++            int j = 4 * k + 2 * h;
++            p[h] = (a[j] < 127 ? a[j] : 127) * b[j] + (a[j + 1] < 127 ? a[j + 1] : 127) * b[j + 1];
++        }
++        r[k] = p[0] * s[2 * k] + p[1] * s[2 * k + 1];
++    }
++}
++static inline void gs_dot_quads_s_i8_0(int32_t *r, const int8_t *a, const int8_t *b, const int16_t *s) {
++    for (int k = 0; k < 8; k++) {
++        int p[2];
++        for (int h = 0; h < 2; h++) {
++            int j = 4 * k + 2 * h;
++            p[h] = (a[j] < -127 ? -127 : a[j]) * (b[j] < -127 ? -127 : b[j]) +
++                   (a[j + 1] < -127 ? -127 : a[j + 1]) * (b[j + 1] < -127 ? -127 : b[j + 1]);
++        }
++        r[k] = p[0] * s[2 * k] + p[1] * s[2 * k + 1];
++    }
++}
++static inline void gs_dot_bytes_0(int32_t *r, const uint8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = a[4 * k] * b[4 * k] + a[4 * k + 1] * b[4 * k + 1] + a[4 * k + 2] * b[4 * k + 2] + a[4 * k + 3] * b[4 * k + 3];
++}
++static inline void gs_dot_bytes_acc_0(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (int32_t)((uint32_t)c[k] + (uint32_t)(a[4 * k] * b[4 * k] + a[4 * k + 1] * b[4 * k + 1] +
++                                                     a[4 * k + 2] * b[4 * k + 2] + a[4 * k + 3] * b[4 * k + 3]));
++}
++static inline void gs_dot_quads_i_0(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++) s += (a[j] < 127 ? a[j] : 127) * b[j];
++        r[k] = (int32_t)((uint32_t)c[k] + (uint32_t)s);
++    }
++}
++static inline void gs_dot_quads_i_i8_0(int32_t *r, const int8_t *a, const int8_t *b, const int32_t *c) {
++    for (int k = 0; k < 8; k++) {
++        int s = 0;
++        for (int j = 4 * k; j < 4 * k + 4; j++)
++            s += (a[j] < -127 ? -127 : a[j]) * (b[j] < -127 ? -127 : b[j]);
++        r[k] = (int32_t)((uint32_t)c[k] + (uint32_t)s);
++    }
++}
++static inline void gs_madd16_0(int32_t *r, const int16_t *a, const int16_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (int32_t)(uint32_t)((int64_t)a[2 * k] * b[2 * k] + (int64_t)a[2 * k + 1] * b[2 * k + 1]);
++}
++static inline void gs_dot_lanes_u8_0(float *r, const uint8_t *a, const int8_t *b) {
++    for (int k = 0; k < 8; k++)
++        r[k] = (float)(a[2 * k] * b[2 * k] + a[2 * k + 1] * b[2 * k + 1] +
++                       a[16 + 2 * k] * b[16 + 2 * k] + a[17 + 2 * k] * b[17 + 2 * k]);
++}
++#if GS_SIMD >= 1 || GS_VLEVEL_BASE >= 1
++#include <immintrin.h>
++#if defined(_MSC_VER) && !defined(__clang__)
++#define GS_VL_FN static __forceinline
++#elif GS_VLEVEL_BASE >= 1
++#define GS_VL_FN static inline __attribute__((always_inline))
++#else
++#define GS_VL_FN static inline __attribute__((always_inline, target("avx2")))
++#endif
++GS_VL_FN void gs_dot_lanes_i8_1(float *r, const int8_t *a, const int8_t *b) {
++    __m256i a0 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)a));
++    __m256i a1 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(a + 16)));
++    __m256i b0 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)b));
++    __m256i b1 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(b + 16)));
++    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(a0, b0), _mm256_madd_epi16(a1, b1));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(s));
++}
++GS_VL_FN void gs_dot_lanes_u8_1(float *r, const uint8_t *a, const int8_t *b) {
++    __m256i a0 = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i *)a));
++    __m256i a1 = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i *)(a + 16)));
++    __m256i b0 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)b));
++    __m256i b1 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(b + 16)));
++    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(a0, b0), _mm256_madd_epi16(a1, b1));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(s));
++}
++GS_VL_FN void gs_dot_quads_1(float *r, const uint8_t *a, const int8_t *b) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    __m256i p = _mm256_maddubs_epi16(u, _mm256_loadu_si256((const __m256i *)b));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_madd_epi16(p, _mm256_set1_epi16(1))));
++}
++GS_VL_FN void gs_dot_quads_i8_1(float *r, const int8_t *a, const int8_t *b) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    __m256i p = _mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_madd_epi16(p, _mm256_set1_epi16(1))));
++}
++GS_VL_FN void gs_dot_quads_s_1(int32_t *r, const uint8_t *a, const int8_t *b, const int16_t *s) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    __m256i p = _mm256_maddubs_epi16(u, _mm256_loadu_si256((const __m256i *)b));
++    _mm256_storeu_si256((__m256i *)r, _mm256_madd_epi16(p, _mm256_loadu_si256((const __m256i *)s)));
++}
++GS_VL_FN void gs_dot_quads_s_i8_1(int32_t *r, const int8_t *a, const int8_t *b, const int16_t *s) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    __m256i p = _mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x));
++    _mm256_storeu_si256((__m256i *)r, _mm256_madd_epi16(p, _mm256_loadu_si256((const __m256i *)s)));
++}
++)GSRT"
++R"GSRT(GS_VL_FN void gs_madd16_1(int32_t *r, const int16_t *a, const int16_t *b) {
++    _mm256_storeu_si256((__m256i *)r, _mm256_madd_epi16(_mm256_loadu_si256((const __m256i *)a), _mm256_loadu_si256((const __m256i *)b)));
++}
++/* dot_bytes without VNNI: a's low seven bits and its top bit as two exact
++   byte multiply-adds, the second weighted 128. */
++GS_VL_FN void gs_dot_bytes_1(int32_t *r, const uint8_t *a, const int8_t *b) {
++    __m256i x = _mm256_loadu_si256((const __m256i *)a);
++    __m256i y = _mm256_loadu_si256((const __m256i *)b);
++    __m256i l = _mm256_maddubs_epi16(_mm256_and_si256(x, _mm256_set1_epi8(127)), y);
++    __m256i h = _mm256_maddubs_epi16(_mm256_and_si256(_mm256_srli_epi16(x, 7), _mm256_set1_epi8(1)), y);
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(_mm256_madd_epi16(l, _mm256_set1_epi16(1)),
++                                                       _mm256_madd_epi16(h, _mm256_set1_epi16(128))));
++}
++GS_VL_FN void gs_dot_quads_i_1(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    __m256i p = _mm256_madd_epi16(_mm256_maddubs_epi16(u, _mm256_loadu_si256((const __m256i *)b)), _mm256_set1_epi16(1));
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(p, _mm256_loadu_si256((const __m256i *)c)));
++}
++GS_VL_FN void gs_dot_quads_i_i8_1(int32_t *r, const int8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    __m256i p = _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x)), _mm256_set1_epi16(1));
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(p, _mm256_loadu_si256((const __m256i *)c)));
++}
++GS_VL_FN void gs_dot_bytes_acc_1(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    gs_dot_bytes_1(r, a, b);
++    _mm256_storeu_si256((__m256i *)r, _mm256_add_epi32(_mm256_loadu_si256((const __m256i *)r), _mm256_loadu_si256((const __m256i *)c)));
++}
++#if GS_SIMD >= 2
++/* Level 2 adds AVX-VNNI: vpdpbusd sums four u8*i8 products into each i32
++   lane without the 16-bit saturation, so the capped or clamped operands of
++   the other levels give the same lanes in one instruction. */
++#define GS_VL_FN2 static inline __attribute__((always_inline, target("avxvnni,avx2")))
++GS_VL_FN2 void gs_dot_bytes_2(int32_t *r, const uint8_t *a, const int8_t *b) {
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_loadu_si256((const __m256i *)a),
++                                                              _mm256_loadu_si256((const __m256i *)b)));
++}
++GS_VL_FN2 void gs_dot_bytes_acc_2(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_loadu_si256((const __m256i *)c), _mm256_loadu_si256((const __m256i *)a),
++                                                              _mm256_loadu_si256((const __m256i *)b)));
++}
++GS_VL_FN2 void gs_dot_quads_i_2(int32_t *r, const uint8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_loadu_si256((const __m256i *)c), u, _mm256_loadu_si256((const __m256i *)b)));
++}
++GS_VL_FN2 void gs_dot_quads_i_i8_2(int32_t *r, const int8_t *a, const int8_t *b, const int32_t *c) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    _mm256_storeu_si256((__m256i *)r, _mm256_dpbusd_avx_epi32(_mm256_loadu_si256((const __m256i *)c), _mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x)));
++}
++GS_VL_FN2 void gs_dot_quads_2(float *r, const uint8_t *a, const int8_t *b) {
++    __m256i u = _mm256_min_epu8(_mm256_loadu_si256((const __m256i *)a), _mm256_set1_epi8(127));
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), u, _mm256_loadu_si256((const __m256i *)b))));
++}
++GS_VL_FN2 void gs_dot_quads_i8_2(float *r, const int8_t *a, const int8_t *b) {
++    __m256i m = _mm256_set1_epi8(-127);
++    __m256i x = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)a), m);
++    __m256i y = _mm256_max_epi8(_mm256_loadu_si256((const __m256i *)b), m);
++    _mm256_storeu_ps(r, _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x))));
++}
++#define gs_dot_quads_s_2 gs_dot_quads_s_1
++#define gs_dot_quads_s_i8_2 gs_dot_quads_s_i8_1
++#define gs_madd16_2 gs_madd16_1
++#define gs_dot_lanes_i8_2 gs_dot_lanes_i8_1
++#define gs_dot_lanes_u8_2 gs_dot_lanes_u8_1
++#endif
++#define gs_dot_bytes_3 gs_dot_bytes_1
++#define gs_dot_quads_i_3 gs_dot_quads_i_1
++#define gs_dot_quads_i_i8_3 gs_dot_quads_i_i8_1
++#define gs_dot_bytes_acc_3 gs_dot_bytes_acc_1
++#define gs_dot_quads_s_3 gs_dot_quads_s_1
++#define gs_dot_quads_s_i8_3 gs_dot_quads_s_i8_1
++#define gs_madd16_3 gs_madd16_1
++#define gs_dot_quads_3 gs_dot_quads_1
++#define gs_dot_quads_i8_3 gs_dot_quads_i8_1
++#define gs_dot_lanes_i8_3 gs_dot_lanes_i8_1
++#define gs_dot_lanes_u8_3 gs_dot_lanes_u8_1
++#endif
++#define gs_dot_lanes_i8(r, a, b) GS_VL_CAT(gs_dot_lanes_i8_, GS_VLEVEL)(r, a, b)
++#define gs_dot_lanes_u8(r, a, b) GS_VL_CAT(gs_dot_lanes_u8_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads(r, a, b) GS_VL_CAT(gs_dot_quads_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads_i8(r, a, b) GS_VL_CAT(gs_dot_quads_i8_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads_s(r, a, b, s) GS_VL_CAT(gs_dot_quads_s_, GS_VLEVEL)(r, a, b, s)
++#define gs_dot_quads_s_i8(r, a, b, s) GS_VL_CAT(gs_dot_quads_s_i8_, GS_VLEVEL)(r, a, b, s)
++#define gs_madd16(r, a, b) GS_VL_CAT(gs_madd16_, GS_VLEVEL)(r, a, b)
++#define gs_dot_bytes(r, a, b) GS_VL_CAT(gs_dot_bytes_, GS_VLEVEL)(r, a, b)
++#define gs_dot_quads_i(r, a, b, c) GS_VL_CAT(gs_dot_quads_i_, GS_VLEVEL)(r, a, b, c)
++#define gs_dot_quads_i_i8(r, a, b, c) GS_VL_CAT(gs_dot_quads_i_i8_, GS_VLEVEL)(r, a, b, c)
++#define gs_dot_bytes_acc(r, a, b, c) GS_VL_CAT(gs_dot_bytes_acc_, GS_VLEVEL)(r, a, b, c)
++
+ )GSRT"
+ R"GSRT(/* The generated code's memcpy and memset of zeros. Most move or clear the
+    1 to 32 bytes of a field, an element or a reference, a constant size the
+@@ -1074,6 +1329,7 @@ R"GSRT(/* One queue per flat element type the program uses (the compiler emits a
+ typedef struct gs_qnode {
+     struct gs_qnode *next;
+     int64_t size;
++    int64_t cap;                     /* Bytes the node can hold (gs_qrelease). */
+     /* Value bytes follow the header. */
+ } gs_qnode;
+ 
+@@ -1087,6 +1343,7 @@ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
+ GS_API gs_qnode *gs_qget(gs_queue *q);
+ GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms);
+ GS_API gs_qnode *gs_qpoll(gs_queue *q);
++GS_API void gs_qrelease(gs_queue *q, gs_qnode *n);
+ GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line);
+ /* Frees a queue and the messages left in it, once no thread program can
+    use it (goose_exit); gs_qinit makes it again. */
+@@ -3674,10 +3931,44 @@ R"GSRT(GS_API void gs_free_msg(uint8_t *msg) {
+ R"GSRT(/* ---------------------------------------------------------------------------
+    Typed queues (runtime.h). A queue holds at most `limit` messages. */
+ 
++)GSRT"
++R"GSRT(/* A receive that finds its queue empty first watches the count, unlocked,
++   for this many pause instructions before it sleeps on the condition
++   variable: a worker pool that hands a job back within microseconds skips
++   the wakeup (os's queue_spin, or GS_QSPIN in the environment; 0 by
++   default, which sleeps at once). The count is only a hint here: the lock
++   decides, as before. */
++static int64_t gs_qspin_n = -1;
++GS_API void gs_qspin_set(int64_t n) { gs_qspin_n = n < 0 ? 0 : n; }
++static int64_t gs_qspins(void) {
++    int64_t n = gs_qspin_n;
++    if (n < 0) {
++        const char *e = getenv("GS_QSPIN");
++        n = e ? strtoll(e, NULL, 10) : 0;
++        gs_qspin_n = n = n < 0 ? 0 : n;
++    }
++    return n;
++}
++#if defined(_MSC_VER) && !defined(__clang__)
++#define gs_cpu_pause() YieldProcessor()
++#elif defined(__x86_64__) || defined(__i386__)
++#define gs_cpu_pause() __asm__ __volatile__("pause")
++#elif defined(__aarch64__)
++#define gs_cpu_pause() __asm__ __volatile__("yield")
++#else
++#define gs_cpu_pause() ((void)0)
++#endif
++#define gs_qready(s) (*(volatile int64_t *)&(s)->count > 0)
++
+ )GSRT"
+ R"GSRT(struct gs_qstate {
+     gs_qnode *head, *tail;
+     int64_t count, limit;
++    /* Taken nodes come back here (gs_qrelease) for the next put, so a busy
++       queue stops calling malloc and free, whose heap lock its threads
++       would otherwise share. */
++    gs_qnode *spare;
++    int64_t nspare;
+     gs_mutex mutex;
+     gs_cond cond;
+ };
+@@ -3721,6 +4012,8 @@ R"GSRT(GS_API void gs_qinit(gs_queue *q) {
+     s->head = s->tail = NULL;
+     s->count = 0;
+     s->limit = INT64_MAX;
++    s->spare = NULL;
++    s->nspare = 0;
+     gs_mutex_init(&s->mutex);
+     #if defined(_WIN32) || defined(__APPLE__)
+         gs_cond_init(&s->cond);
+@@ -3740,8 +4033,21 @@ R"GSRT(/* Allocates and copies before it takes the lock, so the lock is held onl
+    to check the limit and link the node. */
+ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size) {
+     struct gs_qstate *s = *q;
+-    gs_qnode *n = (gs_qnode *)malloc(sizeof(gs_qnode) + (size_t)size);
+-    if (!n) gs_panic("out of memory in qput");
++    gs_qnode *n = NULL;
++    if (*(gs_qnode *volatile *)&s->spare) {
++        gs_mutex_lock(&s->mutex);
++        if (s->spare && s->spare->cap >= size) {
++            n = s->spare;
++            s->spare = n->next;
++            s->nspare--;
++        }
++        gs_mutex_unlock(&s->mutex);
++    }
++    if (!n) {
++        n = (gs_qnode *)malloc(sizeof(gs_qnode) + (size_t)size);
++        if (!n) gs_panic("out of memory in qput");
++        n->cap = size;
++    }
+     n->next = NULL;
+     n->size = size;
+     memcpy(n + 1, data, (size_t)size);
+@@ -3772,6 +4078,7 @@ static gs_qnode *gs_qtake(struct gs_qstate *s) {
+ )GSRT"
+ R"GSRT(GS_API gs_qnode *gs_qget(gs_queue *q) {
+     struct gs_qstate *s = *q;
++    for (int64_t i = gs_qspins(); i > 0 && !gs_qready(s); i--) gs_cpu_pause();
+     gs_mutex_lock(&s->mutex);
+     while (!s->head) gs_cond_wait(&s->cond, &s->mutex);
+     gs_qnode *n = gs_qtake(s);
+@@ -3782,6 +4089,9 @@ R"GSRT(GS_API gs_qnode *gs_qget(gs_queue *q) {
+ )GSRT"
+ R"GSRT(GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
+     struct gs_qstate *s = *q;
++    /* A poll of an empty queue takes no lock, so a loop of them costs its
++       senders nothing. */
++    if (ms <= 0 && !gs_qready(s)) return NULL;
+     /* Caps ms so the deadline in nanoseconds can't overflow. */
+     if (ms > INT64_MAX / 2000000) ms = INT64_MAX / 2000000;
+     int64_t deadline = ms > 0 ? gs_qclock_ns() + ms * 1000000 : 0;
+@@ -3796,6 +4106,23 @@ R"GSRT(GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
+ )GSRT"
+ R"GSRT(GS_API gs_qnode *gs_qpoll(gs_queue *q) { return gs_qwait(q, 0); }
+ 
++)GSRT"
++R"GSRT(/* A taken node, its value copied out: kept for the next put, up to 64 per
++   queue, else freed. */
++GS_API void gs_qrelease(gs_queue *q, gs_qnode *n) {
++    struct gs_qstate *s = *q;
++    if (!n) return;   /* A poll that found nothing hands back no node. */
++    gs_mutex_lock(&s->mutex);
++    if (s->nspare < 64) {
++        n->next = s->spare;
++        s->spare = n;
++        s->nspare++;
++        n = NULL;
++    }
++    gs_mutex_unlock(&s->mutex);
++    free(n);
++}
++
+ )GSRT"
+ R"GSRT(GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line) {
+     if (n <= 0) gs_abort(GS_E_QBOUND, file, line);
+@@ -3811,6 +4138,11 @@ GS_API void gs_qfree(gs_queue *q) {
+     struct gs_qstate *s = *q;
+     if (!s) return;
+     while (s->head) free(gs_qtake(s));
++    while (s->spare) {
++        gs_qnode *n = s->spare;
++        s->spare = n->next;
++        free(n);
++    }
+     #ifndef _WIN32
+         pthread_mutex_destroy(&s->mutex);
+         pthread_cond_destroy(&s->cond);
+@@ -3965,6 +4297,29 @@ static float gs_mul_addf(float x, float y, float z) {
+ #define gs_mul_add(x, y, z) GS_MUL_ADD_CAT(gs_mul_add_, GS_MUL_ADD_MODE)(x, y, z)
+ #define gs_mul_addf(x, y, z) GS_MUL_ADD_CAT(gs_mul_addf_, GS_MUL_ADD_MODE)(x, y, z)
+ 
++)GSRT"
++R"GSRT(/* math's round_even: the nearest integer, ties to even, which is C's rint in
++   the default rounding mode, the only one Goose runs in. Inline, so a loop
++   of them vectorizes (one vroundps in a simd function's versions); where
++   there is no builtin, adding and taking away 2^52 or 2^23 rounds the same. */
++#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
++static inline __attribute__((always_inline)) double gs_round_even(double x) { return __builtin_rint(x); }
++static inline __attribute__((always_inline)) float gs_round_evenf(float x) { return __builtin_rintf(x); }
++#else
++static inline double gs_round_even(double x) {
++    double a = x < 0 ? -x : x;
++    if (!(a < 4503599627370496.0)) return x;
++    double r = (a + 4503599627370496.0) - 4503599627370496.0;
++    return x < 0 ? -r : x > 0 ? r : x;
++}
++static inline float gs_round_evenf(float x) {
++    float a = x < 0 ? -x : x;
++    if (!(a < 8388608.0f)) return x;
++    float r = (a + 8388608.0f) - 8388608.0f;
++    return x < 0 ? -r : x > 0 ? r : x;
++}
++#endif
++
+ )GSRT"
+ R"GSRT(/* math's other libm functions (stdlib/math.goose). C has them set errno on a
+    domain or range error, so a C compiler takes each call for a write to
+@@ -4093,6 +4448,8 @@ GS_API void gs_os_arg(int64_t i, gs_rref out);
+ GS_API uint8_t gs_os_getenv(sl_u8 name, gs_rref out);
+ GS_API uint8_t gs_os_resource_dir(gs_rref out);
+ GS_API int64_t gs_os_time_ns(void);
++GS_API void gs_qspin_set(int64_t n);
++GS_API uint8_t gs_os_pin_thread(int64_t cpu);
+ GS_API int64_t gs_os_clock_ns(void);
+ GS_API void gs_os_sleep_ms(int64_t ms);
+ GS_API uint64_t gs_os_random_u64(void);
+@@ -4868,6 +5225,29 @@ GS_API int64_t gs_os_clock_ns(void) {
+ #endif
+ }
+ 
++)GSRT"
++R"GSRT(/* os's pin_thread: binds the calling thread to logical CPU `cpu`, numbered
++   as the OS numbers them, so a worker pool can put one thread on each core
++   it chooses. true if the OS took it: on Windows the first 64 CPUs of the
++   thread's processor group, on Linux any the process may run on (the
++   system call itself, as gs_os_threads asks it); false elsewhere. */
++GS_API uint8_t gs_os_pin_thread(int64_t cpu) {
++    if (cpu < 0) return 0;
++#ifdef _WIN32
++    if (cpu >= 64) return 0;
++    return SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << cpu) != 0;
++#elif defined(__linux__)
++    unsigned long mask[1024 / (8 * sizeof(unsigned long))];
++    const int64_t bits = (int64_t)(8 * sizeof(unsigned long));
++    if (cpu >= (int64_t)(sizeof mask * 8)) return 0;
++    memset(mask, 0, sizeof mask);
++    mask[cpu / bits] |= 1UL << (cpu % bits);
++    return syscall(SYS_sched_setaffinity, 0, sizeof mask, mask) == 0;
++#else
++    return 0;
++#endif
++}
++
+ )GSRT"
+ R"GSRT(GS_API void gs_os_sleep_ms(int64_t ms) {
+     if (ms <= 0) return;
+diff --git a/src/typecheck_builtins.h b/src/typecheck_builtins.h
+index 21a62e2..a497dcb 100644
+--- a/src/typecheck_builtins.h
++++ b/src/typecheck_builtins.h
+@@ -166,6 +166,102 @@ inline Val TypeCheck::CheckBuiltin(Call *c, const BuiltinDef &d, vector<Node *>
+             v.writable = false;
+             return v;
+         }
++        case B_MADD16: {
++            // madd16(a, b): two i16[16]; lane k of the i32[8] is
++            // a[2k]*b[2k] + a[2k+1]*b[2k+1], wrapping like vpmaddwd.
++            auto x16 = [&](TypeExpr *t) {
++                return t->kind == TY_ARRAY && t->arr->akind == A_FIXED && ArraySize(t->arr) == 16 &&
++                       t->arr->sub->kind == TY_INT && t->arr->sub->intstorage == IS_I16;
++            };
++            auto av = DecayRef(CheckValue(args[0], nullptr));
++            auto bv = DecayRef(CheckValue(args[1], nullptr));
++            if (!x16(av.type) || !x16(bv.type))
++                Error(c, cat("madd16 takes two i16[16], not ", TypeStr(av.type), " and ", TypeStr(bv.type)));
++            args[0]->exprtype = av.type;
++            args[1]->exprtype = bv.type;
++            auto rt = ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, 8);
++            c->rettypes.push_back(rt);
++            Val v;
++            v.type = rt;
++            return v;
++        }
++        case B_DOT_BYTES: {
++            // dot_bytes(a, b, c): a u8[32], b an i8[32]; lane k of the i32[8]
++            // is a[j] * b[j] summed over j = 4k..4k+3, exact, plus the
++            // optional i32[8] c's lane k, wrapping.
++            auto x32 = [&](TypeExpr *t, IntStorage is) {
++                return t->kind == TY_ARRAY && t->arr->akind == A_FIXED && ArraySize(t->arr) == 32 &&
++                       t->arr->sub->kind == TY_INT && t->arr->sub->intstorage == is;
++            };
++            auto av = DecayRef(CheckValue(args[0], nullptr));
++            auto bv = DecayRef(CheckValue(args[1], nullptr));
++            if (!x32(av.type, IS_U8) || !x32(bv.type, IS_I8))
++                Error(c, cat("dot_bytes takes a u8[32] and an i8[32], not ", TypeStr(av.type), " and ", TypeStr(bv.type)));
++            args[0]->exprtype = av.type;
++            args[1]->exprtype = bv.type;
++            if (args.size() > 2) {
++                auto cv = DecayRef(CheckValue(args[2], nullptr));
++                auto t = cv.type;
++                if (!(t->kind == TY_ARRAY && t->arr->akind == A_FIXED && ArraySize(t->arr) == 8 &&
++                      t->arr->sub->kind == TY_INT && t->arr->sub->intstorage == IS_I32))
++                    Error(c, cat("dot_bytes adds an i32[8], not ", TypeStr(t)));
++                args[2]->exprtype = t;
++            }
++            auto rt = ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, 8);
++            c->rettypes.push_back(rt);
++            Val v;
++            v.type = rt;
++            return v;
++        }
++        case B_DOT_LANES: case B_DOT_QUADS: case B_DOT_QUADS_S: case B_DOT_QUADS_I: {
++            // dot_quads_i(a, b, c): dot_quads's lanes as exact i32, plus the
++            // i32[8] c's (wrapping): one vpdpbusd where there is AVX-VNNI.
++            // dot_quads_s(a, b, s): dot_quads's byte pairs as exact i16, pair
++            // p times s[p], lane k the sum of pairs 2k and 2k+1 in an i32.
++            // dot_quads(a, b): lane k is a[j] * b[j] summed over j = 4k..4k+3,
++            // with a u8 capped at 127 or an i8 a and b both clamped to
++            // -127..127: the range AVX2's byte multiply-add holds exactly.
++            // dot_lanes(a, b) (§12): a an i8[32] or u8[32], b an i8[32]; the
++            // f32[8] whose lane k is a[2k]*b[2k] + a[2k+1]*b[2k+1] +
++            // a[16+2k]*b[16+2k] + a[17+2k]*b[17+2k], summed exactly in
++            // integers. One SIMD multiply-add sequence in a simd fn's
++            // versions, a loop elsewhere; every version gives the same lanes.
++            auto x32 = [&](TypeExpr *t, IntStorage is) {
++                return t->kind == TY_ARRAY && t->arr->akind == A_FIXED && ArraySize(t->arr) == 32 &&
++                       t->arr->sub->kind == TY_INT && t->arr->sub->intstorage == is;
++            };
++            auto av = DecayRef(CheckValue(args[0], nullptr));
++            auto bv = DecayRef(CheckValue(args[1], nullptr));
++            if (!(x32(av.type, IS_I8) || x32(av.type, IS_U8)) || !x32(bv.type, IS_I8))
++                Error(c, cat(c->builtin == B_DOT_LANES ? "dot_lanes takes an i8[32] or u8[32] and an i8[32], not "
++                             : c->builtin == B_DOT_QUADS ? "dot_quads takes an i8[32] or u8[32] and an i8[32], not "
++                             : c->builtin == B_DOT_QUADS_I ? "dot_quads_i takes an i8[32] or u8[32] and an i8[32], not "
++                                                         : "dot_quads_s takes an i8[32] or u8[32] and an i8[32], not ",
++                             TypeStr(av.type), " and ", TypeStr(bv.type)));
++            args[0]->exprtype = av.type;
++            args[1]->exprtype = bv.type;
++            if (c->builtin == B_DOT_QUADS_I) {
++                auto cv = DecayRef(CheckValue(args[2], nullptr));
++                auto t = cv.type;
++                if (!(t->kind == TY_ARRAY && t->arr->akind == A_FIXED && ArraySize(t->arr) == 8 &&
++                      t->arr->sub->kind == TY_INT && t->arr->sub->intstorage == IS_I32))
++                    Error(c, cat("dot_quads_i adds an i32[8], not ", TypeStr(t)));
++                args[2]->exprtype = t;
++            }
++            if (c->builtin == B_DOT_QUADS_S) {
++                auto sv = DecayRef(CheckValue(args[2], nullptr));
++                if (!(sv.type->kind == TY_ARRAY && sv.type->arr->akind == A_FIXED && ArraySize(sv.type->arr) == 16 &&
++                      sv.type->arr->sub->kind == TY_INT && sv.type->arr->sub->intstorage == IS_I16))
++                    Error(c, cat("dot_quads_s takes an i16[16] of scales, not ", TypeStr(sv.type)));
++                args[2]->exprtype = sv.type;
++            }
++            auto rt = c->builtin == B_DOT_QUADS_S || c->builtin == B_DOT_QUADS_I ? ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, 8)
++                                                  : ast.ArrayOf(ast.flttypes[FS_F32], A_FIXED, c->line, 8);
++            c->rettypes.push_back(rt);
++            Val v;
++            v.type = rt;
++            return v;
++        }
+         case B_COPY: {
+             // copy(x): a fresh value from stored one (§4.1), for the
+             // destinations that never copy implicitly.
+diff --git a/stdlib/math.goose b/stdlib/math.goose
+index 1fbd6ab..68bb5e6 100644
+--- a/stdlib/math.goose
++++ b/stdlib/math.goose
+@@ -28,6 +28,7 @@ extern fn mul_add(x: f32, y: f32, z: f32) -> f32 = "gs_mul_addf";
+ extern fn floor(x: f64) -> f64;                       extern fn floor(x: f32) -> f32 = "floorf";
+ extern fn ceil(x: f64) -> f64;                        extern fn ceil(x: f32) -> f32 = "ceilf";
+ extern fn round(x: f64) -> f64;                       extern fn round(x: f32) -> f32 = "roundf";
++extern fn round_even(x: f64) -> f64 = "gs_round_even"; extern fn round_even(x: f32) -> f32 = "gs_round_evenf";
+ extern fn trunc(x: f64) -> f64;                       extern fn trunc(x: f32) -> f32 = "truncf";
+ 
+ let PI = 3.141592653589793;
+diff --git a/stdlib/os.goose b/stdlib/os.goose
+index 96b6550..b2c94f3 100644
+--- a/stdlib/os.goose
++++ b/stdlib/os.goose
+@@ -70,6 +70,12 @@ fn args() -> u8[:][>..] {
+ extern fn time_ns() -> i64 = "gs_os_time_ns";    // wall clock, nanoseconds since the epoch
+ extern fn clock_ns() -> i64 = "gs_os_clock_ns";  // monotonic, high resolution
+ extern fn sleep_ms(ms: i64) = "gs_os_sleep_ms";
++// How many pause instructions a receive (qget) spins on an empty queue
++// before it sleeps; 0, the default, sleeps at once (docs/stdlib.md).
++extern fn queue_spin(n: i64) = "gs_qspin_set";
++// Binds the calling thread to one logical CPU; false where the OS refuses
++// or has no such call (docs/stdlib.md).
++extern fn pin_thread(cpu: i64) -> bool = "gs_os_pin_thread";
+ 
+ // A nanosecond count past 2^53 rounds to the nearest f64. A sleep is whole
+ // milliseconds, truncated: `as!`, since that drops the fraction on purpose.
+diff --git a/test/codegen/prefetch.goose b/test/codegen/prefetch.goose
+new file mode 100644
+index 0000000..31b10e3
+--- /dev/null
++++ b/test/codegen/prefetch.goose
+@@ -0,0 +1,27 @@
++// a.prefetch(i, n) (reference §25) is a hint with no effect on what a program
++// computes, wherever i and n fall: past either end, empty, or a slice.
++import std;
++
++simd fn total(a: const i32[:]) -> i64 {
++    var s: i64 = 0;
++    for r in a.len / 16 {
++        a.prefetch((r + 1) * 16 + 64, 16);
++        for j in 16 { s += a[r * 16 + j]; }
++    }
++    return s;
++}
++
++fn main() {
++    var a: i32[>..] = [];
++    for i in 1000 { a.push(i as i32); }
++    a.prefetch(-50, 100);
++    a.prefetch(990, 1000000);
++    a.prefetch(5000, 3);
++    a.prefetch(10, 0);
++    a.prefetch(10, -4);
++    let s = a[100..200];
++    s.prefetch(90, 20);
++    var f: f32[4] = [1.0; 4];
++    f.prefetch(0, 4);
++    print(total(a), " ", total(s), " ", f[3]);
++}
+diff --git a/test/codegen/round_even.goose b/test/codegen/round_even.goose
+new file mode 100644
+index 0000000..20c3a41
+--- /dev/null
++++ b/test/codegen/round_even.goose
+@@ -0,0 +1,18 @@
++// math's round_even (stdlib): nearest integer, ties to even, at both widths,
++// the same in a simd function's versions as in the baseline.
++import std;
++import math;
++
++simd fn quant(x: const f32[:], o: i8[>..]&) { for v in x { o.push(round_even(v) as i8); } }
++
++fn main() {
++    let a: f64[] = [0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 2.4999, -2.5001, 0.0, -0.0, 1e300, -4503599627370497.0];
++    for v in a { print(round_even(v)); }
++    let b: f32[] = [0.5, 1.5, 2.5, -0.5, -3.5, 126.5, -126.5, 8388609.0];
++    for v in b { print(round_even(v)); }
++    var x: f32[>..] = [];
++    for i in 64 { x.push((i as f32 - 32) * 0.5); }
++    var o: i8[>..] = [];
++    quant(x, o);
++    print(o);
++}
+diff --git a/test/codegen/simd_dot_lanes.goose b/test/codegen/simd_dot_lanes.goose
+new file mode 100644
+index 0000000..793ca71
+--- /dev/null
++++ b/test/codegen/simd_dot_lanes.goose
+@@ -0,0 +1,131 @@
++// dot_lanes (§12, reference §25): lane k of the f32[8] is a[2k]*b[2k] +
++// a[2k+1]*b[2k+1] + a[16+2k]*b[16+2k] + a[17+2k]*b[17+2k], exact in every
++// version: the plain function, a simd function's AVX2 and AVX-512 bodies,
++// and code built for AVX2 as a whole. The extremes of both operand types.
++import std;
++
++fn plain(a: i8[32], b: i8[32]) -> f32[8] { dot_lanes(a, b) }
++simd fn vec(a: i8[32], b: i8[32]) -> f32[8] { dot_lanes(a, b) }
++fn plainu(a: u8[32], b: i8[32]) -> f32[8] { dot_lanes(a, b) }
++simd fn vecu(a: u8[32], b: i8[32]) -> f32[8] { dot_lanes(a, b) }
++
++fn want(a: i8[32], b: i8[32]) -> f32[8] {
++    var r: f32[8] = [0.0; 8];
++    for k in 8 { r[k] = a[2 * k] as i32 * b[2 * k] + a[2 * k + 1] as i32 * b[2 * k + 1] + a[16 + 2 * k] as i32 * b[16 + 2 * k] + a[17 + 2 * k] as i32 * b[17 + 2 * k]; }
++    return r;
++}
++fn wantu(a: u8[32], b: i8[32]) -> f32[8] {
++    var r: f32[8] = [0.0; 8];
++    for k in 8 { r[k] = a[2 * k] as i32 * b[2 * k] + a[2 * k + 1] as i32 * b[2 * k + 1] + a[16 + 2 * k] as i32 * b[16 + 2 * k] + a[17 + 2 * k] as i32 * b[17 + 2 * k]; }
++    return r;
++}
++
++// A kernel accumulates the lanes across blocks and sums them once.
++simd fn dot(a: const i8[:], b: const i8[:]) -> f32 {
++    var acc: f32[8] = [0.0; 8];
++    for i in a.len / 32 {
++        var x: i8[32] = [0; 32];
++        var y: i8[32] = [0; 32];
++        for j in 32 { x[j] = a[i * 32 + j]; y[j] = b[i * 32 + j]; }
++        acc = acc + dot_lanes(x, y) * 0.5;
++    }
++    return acc[0] + acc[1] + acc[2] + acc[3] + acc[4] + acc[5] + acc[6] + acc[7];
++}
++
++fn main() {
++    var lo: i8[32] = [-128; 32];
++    var hi: i8[32] = [127; 32];
++    var uhi: u8[32] = [255; 32];
++    print(plain(lo, lo), " ", vec(lo, lo));
++    print(plain(lo, hi), " ", vec(lo, hi));
++    print(plainu(uhi, lo), " ", vecu(uhi, lo));
++    var r = rng { 11 };
++    var bad = 0;
++    for it in 500 {
++        var a: i8[32] = [0; 32];
++        var b: i8[32] = [0; 32];
++        var u: u8[32] = [0; 32];
++        for j in 32 { a[j] = (r.rand_int(256) - 128) as! i8; b[j] = (r.rand_int(256) - 128) as! i8; u[j] = r.rand_int(256) as! u8; }
++        let w = want(a, b);
++        let wu = wantu(u, b);
++        if plain(a, b) != w || vec(a, b) != w || plainu(u, b) != wu || vecu(u, b) != wu { bad++; }
++    }
++    print("mismatches ", bad);
++    var a: i8[>..] = [];
++    var b: i8[>..] = [];
++    for i in 320 { a.push((i % 7 - 3) as i8); b.push((i % 5 - 2) as i8); }
++    print(dot(a, b));
++    main_quads();
++}
++
++fn plainq(a: u8[32], b: i8[32]) -> f32[8] { dot_quads(a, b) }
++fn plainqs(a: i8[32], b: i8[32]) -> f32[8] { dot_quads(a, b) }
++simd fn vecqs(a: i8[32], b: i8[32]) -> f32[8] { dot_quads(a, b) }
++simd fn vecq(a: u8[32], b: i8[32]) -> f32[8] { dot_quads(a, b) }
++fn plainsq(a: u8[32], b: i8[32], s: i16[16]) -> i32[8] { dot_quads_s(a, b, s) }
++simd fn vecsq(a: u8[32], b: i8[32], s: i16[16]) -> i32[8] { dot_quads_s(a, b, s) }
++fn plainsqs(a: i8[32], b: i8[32], s: i16[16]) -> i32[8] { dot_quads_s(a, b, s) }
++simd fn vecsqs(a: i8[32], b: i8[32], s: i16[16]) -> i32[8] { dot_quads_s(a, b, s) }
++fn plainma(a: i16[16], b: i16[16]) -> i32[8] { madd16(a, b) }
++fn plainby(a: u8[32], b: i8[32]) -> i32[8] { dot_bytes(a, b) }
++simd fn vecby(a: u8[32], b: i8[32]) -> i32[8] { dot_bytes(a, b) }
++fn plainbc(a: u8[32], b: i8[32], c: i32[8]) -> i32[8] { dot_bytes(a, b, c) }
++fn plainqi(a: u8[32], b: i8[32], c: i32[8]) -> i32[8] { dot_quads_i(a, b, c) }
++simd fn vecqi(a: u8[32], b: i8[32], c: i32[8]) -> i32[8] { dot_quads_i(a, b, c) }
++fn plainqi8(a: i8[32], b: i8[32], c: i32[8]) -> i32[8] { dot_quads_i(a, b, c) }
++simd fn vecqi8(a: i8[32], b: i8[32], c: i32[8]) -> i32[8] { dot_quads_i(a, b, c) }
++simd fn vecbc(a: u8[32], b: i8[32], c: i32[8]) -> i32[8] { dot_bytes(a, b, c) }
++simd fn vecma(a: i16[16], b: i16[16]) -> i32[8] { madd16(a, b) }
++fn main_quads() {
++    var r = rng { 5 };
++    var bad = 0;
++    for it in 500 {
++        var a: u8[32] = [0; 32];
++        var b: i8[32] = [0; 32];
++        for j in 32 { a[j] = r.rand_int(256) as! u8; b[j] = (r.rand_int(256) - 128) as! i8; }
++        var w: f32[8] = [0.0; 8];
++        for k in 8 { var s = 0; for j in 4 * k..4 * k + 4 { s += min(a[j] as i64, 127) * b[j]; } w[k] = s; }
++        if plainq(a, b) != w || vecq(a, b) != w { bad++; }
++        var sa: i8[32] = [0; 32];
++        for j in 32 { sa[j] = (r.rand_int(256) - 128) as! i8; }
++        var ws: f32[8] = [0.0; 8];
++        for k in 8 { var s = 0; for j in 4 * k..4 * k + 4 { s += max(sa[j] as i64, -127) * max(b[j] as i64, -127); } ws[k] = s; }
++        if plainqs(sa, b) != ws || vecqs(sa, b) != ws { bad++; }
++        var sc: i16[16] = [0; 16];
++        var sd: i16[16] = [0; 16];
++        for j in 16 { sc[j] = (r.rand_int(65536) - 32768) as! i16; sd[j] = (r.rand_int(65536) - 32768) as! i16; }
++        var wi: i32[8] = [0; 8];
++        var wis: i32[8] = [0; 8];
++        var wm: i32[8] = [0; 8];
++        for k in 8 {
++            var p: i64 = 0;
++            var q: i64 = 0;
++            for j in 4 * k..4 * k + 4 { p += min(a[j] as i64, 127) * b[j] * sc[j / 2]; q += max(sa[j] as i64, -127) * max(b[j] as i64, -127) * sc[j / 2]; }
++            wi[k] = p as i32;
++            wis[k] = q as i32;
++            wm[k] = (sc[2 * k] as i64 * sd[2 * k] + sc[2 * k + 1] as i64 * sd[2 * k + 1]) as i32;
++        }
++        var wb: i32[8] = [0; 8];
++        for k in 8 { var q: i64 = 0; for j in 4 * k..4 * k + 4 { q += a[j] as i64 * b[j]; } wb[k] = q as i32; }
++        if plainby(a, b) != wb || vecby(a, b) != wb { bad++; }
++        var cc: i32[8] = [0; 8];
++        var wc: i32[8] = [0; 8];
++        for k in 8 { cc[k] = (r.rand_int(1 << 32) - (1 << 31)) as! i32; wc[k] = (cc[k] as i64 + wb[k]) as! i32; }
++        if plainbc(a, b, cc) != wc || vecbc(a, b, cc) != wc { bad++; }
++        var wq: i32[8] = [0; 8];
++        var wq8: i32[8] = [0; 8];
++        for k in 8 {
++            var p: i64 = 0;
++            var q: i64 = 0;
++            for j in 4 * k..4 * k + 4 { p += min(a[j] as i64, 127) * b[j]; q += max(sa[j] as i64, -127) * max(b[j] as i64, -127); }
++            wq[k] = (cc[k] + p) as! i32;
++            wq8[k] = (cc[k] + q) as! i32;
++        }
++        if plainqi(a, b, cc) != wq || vecqi(a, b, cc) != wq || plainqi8(sa, b, cc) != wq8 || vecqi8(sa, b, cc) != wq8 { bad++; }
++        if plainsq(a, b, sc) != wi || vecsq(a, b, sc) != wi || plainsqs(sa, b, sc) != wis || vecsqs(sa, b, sc) != wis || plainma(sc, sd) != wm || vecma(sc, sd) != wm { bad++; }
++    }
++    var a: u8[32] = [255; 32];
++    var b: i8[32] = [-128; 32];
++    var c: i8[32] = [-128; 32];
++    print("quads ", vecq(a, b), " ", vecqs(c, b), " ", vecsq(a, b, [-32768; 16]), " ", vecsqs(c, b, [3; 16]), " ", vecma([-32768; 16], [-32768; 16]), " ", vecby(a, b), " mismatches ", bad);
++}
+diff --git a/test/errors_tc/dot_lanes_types.goose b/test/errors_tc/dot_lanes_types.goose
+new file mode 100644
+index 0000000..1845b8e
+--- /dev/null
++++ b/test/errors_tc/dot_lanes_types.goose
+@@ -0,0 +1,7 @@
++// error: dot_lanes takes an i8[32] or u8[32] and an i8[32], not i16[32] and i8[32]
++// dot_lanes multiplies bytes (reference §25).
++fn main() {
++    let a: i16[32] = [1; 32];
++    let b: i8[32] = [1; 32];
++    print(dot_lanes(a, b));
++}
+diff --git a/test/expected/prefetch.out b/test/expected/prefetch.out
+new file mode 100644
+index 0000000..5986a35
+--- /dev/null
++++ b/test/expected/prefetch.out
+@@ -0,0 +1 @@
++491536 14160 1.0
+diff --git a/test/expected/queue_recycle_spin.out b/test/expected/queue_recycle_spin.out
+new file mode 100644
+index 0000000..d8cac9f
+--- /dev/null
++++ b/test/expected/queue_recycle_spin.out
+@@ -0,0 +1,2 @@
++empty poll: false 0
++sum 2789774 bytes 29800
+diff --git a/test/expected/round_even.out b/test/expected/round_even.out
+new file mode 100644
+index 0000000..0c98c2b
+--- /dev/null
++++ b/test/expected/round_even.out
+@@ -0,0 +1,21 @@
++0.0
++2.0
++2.0
++-0.0
++-2.0
++-2.0
++2.0
++-3.0
++0.0
++-0.0
++1e+300
++-4503599627370497.0
++0.0
++2.0
++2.0
++-0.0
++-4.0
++126.0
++-126.0
++8388609.0
++[-16, -16, -15, -14, -14, -14, -13, -12, -12, -12, -11, -10, -10, -10, -9, -8, -8, -8, -7, -6, -6, -6, -5, -4, -4, -4, -3, -2, -2, -2, -1, 0, 0, 0, 1, 2, 2, 2, 3, 4, 4, 4, 5, 6, 6, 6, 7, 8, 8, 8, 9, 10, 10, 10, 11, 12, 12, 12, 13, 14, 14, 14, 15, 16]
+diff --git a/test/expected/simd_dot_lanes.out b/test/expected/simd_dot_lanes.out
+new file mode 100644
+index 0000000..37f4329
+--- /dev/null
++++ b/test/expected/simd_dot_lanes.out
+@@ -0,0 +1,6 @@
++[65536.0, 65536.0, 65536.0, 65536.0, 65536.0, 65536.0, 65536.0, 65536.0] [65536.0, 65536.0, 65536.0, 65536.0, 65536.0, 65536.0, 65536.0, 65536.0]
++[-65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0] [-65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0]
++[-130560.0, -130560.0, -130560.0, -130560.0, -130560.0, -130560.0, -130560.0, -130560.0] [-130560.0, -130560.0, -130560.0, -130560.0, -130560.0, -130560.0, -130560.0, -130560.0]
++mismatches 0
++5.0
++quads [-65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0, -65024.0] [64516.0, 64516.0, 64516.0, 64516.0, 64516.0, 64516.0, 64516.0, 64516.0] [2130706432, 2130706432, 2130706432, 2130706432, 2130706432, 2130706432, 2130706432, 2130706432] [193548, 193548, 193548, 193548, 193548, 193548, 193548, 193548] [-2147483648, -2147483648, -2147483648, -2147483648, -2147483648, -2147483648, -2147483648, -2147483648] [-130560, -130560, -130560, -130560, -130560, -130560, -130560, -130560] mismatches 0
+diff --git a/test/run_tests.py b/test/run_tests.py
+index 17c55de..926a361 100755
+--- a/test/run_tests.py
++++ b/test/run_tests.py
+@@ -2105,7 +2105,7 @@ def main():
+         # The versions of the simd functions (spec §7.12) exist only where
+         # clang builds for x86-64: each level the C may be built for runs
+         # here, at -O2 so the loops vectorize, and has to print what the
+-        # baseline does. On a CPU without AVX-512 or AVX2 the higher builds
++        # baseline does. On a CPU without AVX-512, AVX-VNNI or AVX2 the higher builds
+         # run the highest version it has, which is still a version.
+         # simd_versions.goose covers the language's side; the stdlib fixtures
+         # check the library's simd functions, as clang builds them.
+@@ -2115,8 +2115,8 @@ def main():
+             # The generic total has two specializations, numbered.
+             missing = [f for f in ("caesar_g", "checksum_g", "muladd_g", "squares_g", "minmax_g",
+                                    "biased_g", "fib_g", "sum3_g", "squares_g_er")
+-                       if f"{f}_simd1(" not in ctext or f"{f}_simd2(" not in ctext]
+-            if len(set(re.findall(r"\b(total_g_\d+)_simd[12]\(", ctext))) != 2:
++                       if any(f"{f}_simd{lv}(" not in ctext for lv in (1, 2, 3))]
++            if len(set(re.findall(r"\b(total_g_\d+)_simd[123]\(", ctext))) != 2:
+                 missing.append("total_g")
+             return missing
+ 
+@@ -2124,8 +2124,7 @@ def main():
+             # A C name may carry a specialization's number after the module's.
+             def missing(ctext):
+                 return [f for f in names
+-                        if not re.search(rf"\b{f}_g\d+(_\d+)?_simd1\(", ctext)
+-                        or not re.search(rf"\b{f}_g\d+(_\d+)?_simd2\(", ctext)]
++                        if any(not re.search(rf"\b{f}_g\d+(_\d+)?_simd{lv}\(", ctext) for lv in (1, 2, 3))]
+             return missing
+ 
+         def clang_simd(name, path, versions):
+@@ -2138,7 +2137,7 @@ def main():
+             if missing:
+                 r.fail(f"simd-clang {name}.goose", f"no simd versions of {', '.join(missing)}")
+                 return
+-            for level in ("2", "1", "0"):
++            for level in ("3", "2", "1", "0"):
+                 label = f"simd{level}"
+                 out_exe = gendir / f"simdclang-{name}-{level}{tc.EXE_SUFFIX}"
+                 ok, log = clang.compile(src, out_exe, opt=2, warn="off", strict_decls=True,
+@@ -2199,7 +2198,7 @@ def main():
+                                  r"\bdirect_g\w*_simd1\(", ctext):
+                     r.fail(f"mul_add-clang{gopt} {name}.goose", "no fused mode around the AVX2 version")
+                     continue
+-                for level in ("2", "1", "0"):
++                for level in ("3", "2", "1", "0"):
+                     label = f"mul_add-simd{level}-clang{gopt} {name}.goose"
+                     out_exe = gendir / f"muladdclang-{tag}-{level}{tc.EXE_SUFFIX}"
+                     ok, log = clang.compile(src, out_exe, opt=2, warn="off", strict_decls=True,
+diff --git a/test/threads/queue_recycle_spin.goose b/test/threads/queue_recycle_spin.goose
+new file mode 100644
+index 0000000..d456c7b
+--- /dev/null
++++ b/test/threads/queue_recycle_spin.goose
+@@ -0,0 +1,43 @@
++// Queue nodes are recycled (gs_qrelease) across messages whose sizes grow
++// and shrink, a poll of an empty queue takes no lock, and a receive may spin
++// before it sleeps (os's queue_spin). pin_thread's answer is the platform's,
++// so only the call is made.
++import std;
++import os;
++
++struct Job { n: i32, body: u8[] }
++struct Done { n: i32, sum: i64, len: i64 }
++
++thread_fn worker() {
++    pin_thread(0);
++    loop {
++        let j = qget<Job>();
++        guard j.n >= 0 else { break; }
++        var s = 0;
++        for b in j.body { s += b; }
++        qput(Done { n: j.n, sum: s, len: j.body.len });
++    }
++}
++
++fn fill(n: i64) -> u8[>..] {
++    var p: u8[>..] = [];
++    for i in (n * 37) % 300 { p.push((i % 256) as! u8); }
++    return p;
++}
++
++fn main() {
++    queue_spin(2000);
++    let e, ok = qpoll<Done>();
++    print("empty poll: ", ok, " ", e.n);
++    let id = thread_spawn(worker);
++    var total = 0;
++    var bytes = 0;
++    for round in 20 {
++        for i in 10 { qput(Job { n: (round * 10 + i) as i32, body: fill(round * 10 + i) }); }
++        for i in 10 { let d = qget<Done>(); total += d.sum; bytes += d.len; }
++    }
++    qput(Job { n: -1, body: [] });
++    thread_wait(id);
++    queue_spin(0);
++    print("sum ", total, " bytes ", bytes);
++}

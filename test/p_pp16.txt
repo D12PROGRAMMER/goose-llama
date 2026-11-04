@@ -1,0 +1,4 @@
+# Goose, by example
+
+<details>
+<summary>Table of contents<

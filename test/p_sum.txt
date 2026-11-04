@@ -1,0 +1,17 @@
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Repeat the following list exactly, then number each line:
+apples
+bananas
+cherries
+dates
+elderberries
+figs
+grapes
+honeydew
+kiwis
+lemons
+mangoes
+nectarines<|im_end|>
+<|im_start|>assistant

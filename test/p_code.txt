@@ -1,0 +1,32 @@
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Add Python type hints to every function in this code. Output only the full updated code.
+
+def parse_config(path):
+    result = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            result[key.strip()] = value.strip()
+    return result
+
+
+def merge_configs(base, override):
+    merged = dict(base)
+    for key, value in override.items():
+        merged[key] = value
+    return merged
+
+
+def load_all(paths):
+    configs = [parse_config(p) for p in paths]
+    out = {}
+    for c in configs:
+        out = merge_configs(out, c)
+    return out
+<|im_end|>
+<|im_start|>assistant

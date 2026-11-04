@@ -1,0 +1,314 @@
+# Goose, by example
+
+<details>
+<summary>Table of contents</summary>
+
+- [1. The core idea](#1-the-core-idea)
+- [2. Running something](#2-running-something)
+- [3. Familiar syntax](#3-familiar-syntax)
+- [4. Where values live](#4-where-values-live)
+- [5. The array family](#5-the-array-family)
+- [6. Strings are byte arrays](#6-strings-are-byte-arrays)
+- [7. Slices that cannot dangle](#7-slices-that-cannot-dangle)
+- [8. Nested data stays inline](#8-nested-data-stays-inline)
+- [9. Enums, in two sizes](#9-enums-in-two-sizes)
+- [10. Linking things without pointers](#10-linking-things-without-pointers)
+- [11. Lifetimes that do not nest](#11-lifetimes-that-do-not-nest)
+- [12. Errors, and `return … from`](#12-errors-and-return--from)
+- [13. Generics, and blocks that disappear](#13-generics-and-blocks-that-disappear)
+- [14. Threads that share nothing](#14-threads-that-share-nothing)
+- [15. Saving and loading data as bytes](#15-saving-and-loading-data-as-bytes)
+- [16. Calling C](#16-calling-c)
+- [17. About the speed](#17-about-the-speed)
+- [18. Limitations](#18-limitations)
+- [19. Calling Goose from C](#19-calling-goose-from-c)
+- [20. Where to go next](#20-where-to-go-next)
+
+</details>
+
+This tutorial introduces Goose through examples. It assumes some experience
+with C, C++, Rust, Go, or a similar language and focuses on Goose's
+differences. Start here, then go on to
+[the language reference](reference.md), which covers the whole language topic
+by topic. Consult [the specification](goose_spec.md) for exact rules, and see
+[`samples/`](../samples/README.md) for complete programs.
+
+Much of the syntax is familiar: braces, `let`, `fn`, `struct`, and `match`.
+The main difference is how arrays store and manage data. We start with where
+values live, since that explains many of the language's other choices.
+
+---
+
+## 1. The core idea
+
+Here is an array of strings.
+
+```goose
+var words: u8[][>..] = [];
+for i in 5 { words.push(str("word", i)); }
+```
+
+In C++ that is a `vector<string>`: one heap allocation for the vector, one
+per string, a pointer and a capacity per element, and a walk over all of them
+when it goes out of scope. In Rust it is a `Vec<String>` with the same shape.
+
+In Goose it is **one contiguous block of bytes**: a length, then five
+back-to-back `(length, characters)` runs. The block was created by bumping a
+pointer, and it disappears when the enclosing scope ends and that pointer
+moves back. No heap allocator or per-string deallocation is needed, and the
+block contains no pointers.
+
+```
+words:  05 00 00 00 | 05 w o r d 0 | 05 w o r d 1 | 05 w o r d 2 | ...
+```
+
+The memory model has four main properties:
+
+* Memory is a handful of big **data stacks**. Growth is a pointer bump.
+* Every dynamic value is **owned by a variable**. The only deallocation is a
+  scope ending, which resets a pointer.
+* Values nest **inline**. A string inside a struct inside an array is bytes
+  inside bytes inside bytes.
+* You may still take **references into a growing container**, and the
+  compiler proves they never dangle, without annotations such as `'a` and
+  without `Rc`.
+
+This model has limitations. They are listed in
+[section 18](#18-limitations), together with the rules that impose
+them and how to work with each. It also has measurable benefits: over
+sixteen benchmarks Goose runs at about **3.3x the speed of idiomatic C++**,
+roughly level with hand-tuned C++ and with the best safe Rust, while using
+**1.9x less memory** than the C++ and 1.2x less than the Rust
+([`bench/summary.md`](../bench/summary.md)). Most of the gains come from
+differences in data layout and memory management.
+
+---
+
+## 2. Running something
+
+Goose compiles the whole program to C and builds that with whatever C
+compiler is around, into an executable beside the source:
+
+```bash
+goose build hello.goose && ./hello
+```
+
+`goose -o hello.c hello.goose` writes the C for you to build yourself, and
+`goose build --dry-run hello.goose` prints the commands.
+[command_line.md](command_line.md) describes the rest of `goose build` and
+the other commands, and [packages.md](packages.md) how a program uses
+libraries from other repositories.
+
+The bundled TinyCC backend needs no separate C compiler. With no verb, or
+with `goose run`, the program is compiled into the compiler's own process and
+run there, which is what you want while you are reading this:
+
+```bash
+goose hello.goose
+```
+
+Here is a minimal program:
+
+```goose
+fn main() {
+    print("hello, goose");
+}
+```
+
+`print` takes any number of arguments of any type, renders each as text and
+writes them all as a single line. It uses a single `write`, so the output of
+two threads never interleaves. There is no format string and no `<<`.
+
+```goose
+print("answer=", 42, " ratio=", 0.75, " yes=", 3 > 2);
+```
+
+Every value can be printed, not only scalars: arrays print as `[1, 2, 3]`,
+structs as `Point { 1, 2 }`, and a `u8` array as its bytes. The samples print
+a lot because printing is a convenient way to inspect values.
+
+---
+
+## 3. Familiar syntax
+
+`let` creates a binding that cannot be reassigned; `var` allows reassignment.
+Neither makes the contents read-only: use `const` for that. Types follow the
+name and can usually be inferred:
+
+```goose
+let answer = 42;
+var count: i32 = 0;
+let ratio = 0.75;
+count += 1;
+count++;              // a statement, not an expression
+```
+
+A struct literal either names its fields or lists them in order, and it may
+leave out fields that declare a default. A literal that ends in `..` may
+leave out any field: a field without a declared default then gets its type's
+default (zero, an empty array or string, or null). Globals are declared like
+locals, and a `var` global given only a type starts out with these same
+defaults:
+
+```goose
+struct Unit { kind: i32, hp: i32 = 100, x: f32, y: f32, name: u8[] }
+
+let scout = Unit { kind: 2, x: 1.5, .. };   // hp 100, y 0, name ""
+var selected: Unit;                         // kind 0, hp 100, x 0, y 0, name ""
+var log: u8[][>..];                         // empty
+```
+
+Functions are free functions. There are no methods and no `impl` blocks, but
+`x.f(a)` calls `f(x, a)`, so you can write method-call syntax
+wherever it reads better:
+
+```goose
+fn total(xs: i64[:]) -> i64 {
+    var t = 0;
+    for x in xs { t += x; }
+    return t;
+}
+```
+
+`if`, `match`, `block` and `{ }` are **expressions**: a block's value is its
+trailing expression. So there is no ternary operator, and no need to declare
+a variable and then assign it in every branch:
+
+```goose
+let kind  = if hp > 50 { "healthy" } else { "hurt" };
+let level = match hp { 0 => "dead", 1..50 => "low", _ => "fine" };
+```
+
+`guard` states a condition that the rest of its block depends on.
+`guard c;` runs the rest of the block only where `c` holds, and
+`guard c else { … }` runs the `else` block instead. To leave more than the
+current block, put a `return`, `break` or `continue` in that `else` block.
+`block` gives `break` a target without a loop, so a chain of checks can bail
+out with a value:
+
+```goose
+let verdict = block {
+    guard p.alive else { break "gone"; }
+    guard p.hp > 0 else { break "dead"; }
+    "standing"
+};
+```
+
+`defer` runs a statement or a block when the enclosing block ends, whichever
+way it ends: the end of the block, `break`, `continue`, `return`, or a
+`return … from` passing through. The cleanup stays next to what it cleans
+up, and runs on the ways out that the code after it does not mention:
+
+```goose
+guard gfx::open("demo", 640, 480, 0) else { return; }
+defer gfx::close();                 // every way out of this block from here on
+```
+
+A `defer` in a loop body runs at the end of each iteration, and an exit runs
+only the defers it has run past, latest first. The body cannot jump out, and
+it cannot use long-distance returns, since it may run while one is in
+flight.
+
+Loops are `for x in range_or_array`, `while`, and `loop`:
+
+```goose
+for i in 3 { }              // 0, 1, 2
+for i in 10..13 { }         // 10, 11, 12
+for i: i32 in 0..n { }      // i is an i32; n must widen to one
+for i: u8 in 0..256 { }     // every u8
+for x in xs { }             // copies, for fixed-size elements
+for &x in xs { x *= 2; }    // references: the mutation form
+for x, i in xs { }          // with the index
+```
+
+Several return values are a calling convention, not a tuple type (Goose has
+no tuple type). By custom, a trailing `bool` says whether the other values
+mean anything:
+
+```goose
+fn divide(a: i64, b: i64) -> i64, bool {
+    if b == 0 { return 0, false; }
+    return a / b, true;
+}
+
+let q, ok = divide(7, 2);
+```
+
+To assign the results to variables, fields or elements that already exist,
+use `=`: `q, ok = divide(9, 3);`.
+
+Only `return` and a call's results carry several values, so a branch cannot
+end in `a, b`. `return if c { 1, 2 } else { 3, 4 };` is an error; instead,
+each branch returns on its own, as in `divide`.
+
+Trailing parameters can have defaults, which a call may leave out:
+
+```goose
+fn limit(x: i64, lo: i64 = 0, hi: i64 = 100) -> i64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+print(limit(250), " ", limit(-5, -10));   // 100 -5
+```
+
+A default is evaluated at each call that leaves it out. It can refer to the
+same things a top-level declaration can (globals, constants and functions),
+but never to the caller's variables, even ones with matching names.
+
+Three arithmetic rules need particular attention:
+
+**Arithmetic happens at the operands' own width.** `u8 + u8` is an 8-bit add.
+A narrower type widens into a wider one implicitly; nothing narrows without
+`as` (range-checked in debug) or `as!` (never checked). `u32 + i32` is a
+compile error that asks which one you meant; the language does not silently
+promote both to 64 bits. The declared widths determine the operation.
+
+Integers become floats implicitly, so `n * x` with `x: f32` is an `f32`
+multiply; a float becomes an integer only through `as`. A float literal has
+no width of its own, and neither does an expression made of float literals
+and integers: `n * 0.5` is computed in `f32` when it is passed to an `f32`
+parameter, and is an `f64` in `let h = n * 0.5;`. An `if` or `match` whose
+branches are all literals adapts to its context as a literal does. A branch
+that is a literal takes the type of the other branches:
+`if big { x } else { 0.5 }` is an `f32` for an `x: f32`.
+
+A cast that changes nothing gets a warning, so the compiler points out the
+casts that these rules make unnecessary. With `b: u8`,
+`let w: i64 = b as i64;` gives the warning
+``redundant `as i64`: a u8 converts to i64 implicitly here``. A cast that
+picks a type or an operation's width, as in `let id = b as i32;` or
+`(a as i64) * b`, is not redundant and gets no warning.
+
+**`%` is Euclidean.** The result is in `[0, |b|)` and never negative, at
+every integer type. So `x % n` is a valid index into a length-`n` array for
+*any* `x`, and the compiler can drop the bounds check instead of demanding a
+guard you know is redundant.
+
+```goose
+print(-7 % 3, " ", 7 % -3);       // 2 1
+```
+
+Integer `/` truncates toward zero: `-7 / 3` is `-2`. It does not pair with
+Euclidean `%` for negative dividends. Import `std` for `rem(a, b)`, the
+remainder that pairs with `/`, and `div_euclid(a, b)`, the quotient that
+pairs with `%`. For example, a coordinate of `-1` in tiles 10 wide has tile
+`div_euclid(-1, 10) == -1` and offset `-1 % 10 == 9`.
+
+**Unsigned arithmetic wraps, in every build**, by definition, because that
+is what hashes and PRNGs mean by unsigned math. Signed overflow aborts in
+debug and wraps in release.
+
+---
+
+## 4. Where values live
+
+A Goose program has the native call stack, some static data, and **N data
+stacks**, where N is a small number the compiler works out for your program.
+A data stack is a multi-gigabyte address-space reservation with a bump
+pointer. There is no other memory system: no `malloc`, no free list, no GC,
+no reference counting and no destructors.
+
+So every dynamic value is owned by a variable, and the rules that make this
+work are:
+
+1. Values are pushed in lifetim

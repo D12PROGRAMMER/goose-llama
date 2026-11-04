@@ -1,0 +1,5 @@
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Write a short story about a goose who learns to fly a plane.<|im_end|>
+<|im_start|>assistant

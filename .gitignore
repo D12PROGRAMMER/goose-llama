@@ -1,0 +1,6 @@
+*.exe
+results/compare.log
+__pycache__/
+results/goose-llama-slides.pdf
+results/slides/
+test/slides.py

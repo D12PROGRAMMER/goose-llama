@@ -1,0 +1,18 @@
+# Goose, by example
+
+<details>
+<summary>Table of contents</summary>
+
+- [1. The core idea](#1-the-core-idea)
+- [2. Running something](#2-running-something)
+- [3. Familiar syntax](#3-familiar-syntax)
+- [4. Where values live](#4-where-values-live)
+- [5. The array family](#5-the-array-family)
+- [6. Strings are byte arrays](#6-strings-are-byte-arrays)
+- [7. Slices that cannot dangle](#7-slices-that-cannot-dangle)
+- [8. Nested data stays inline](#8-nested-data-stays-inline)
+- [9. Enums, in two sizes](#9-enums-in-two-sizes)
+- [10. Linking things without pointers](#10-linking-things-without-pointers)
+- [11. Lifetimes that do not nest](#11-lifetimes-that-do-not-nest)
+- [12. Errors, and `return … from`](#12-errors-and-return--from)
+- [13. Generics, and blocks that disappear](#13-generics-and-

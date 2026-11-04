@@ -1,0 +1,6 @@
+# Goose, by example
+
+<details>
+<summary>Table of contents</summary>
+
+- [1. The core idea](#1-the-core-ide
