@@ -61,11 +61,37 @@ index e4cda4d..b94ceac 100644
  fn random_seed() -> u64                              // entropy, for rng
  ```
  
+diff --git a/scripts/toolchain.py b/scripts/toolchain.py
+index ebdb0aa..82a3647 100755
+--- a/scripts/toolchain.py
++++ b/scripts/toolchain.py
+@@ -347,7 +347,8 @@ class CC:
+             argv += ["/LD", *map(str, sources), f"/Fe:{out}", f"/Fo:{out.parent}{os.sep}"]
+         else:
+             argv += [f"-I{i}" for i in includes]
+-            argv += ["-shared", "-fPIC", *map(str, sources), "-o", str(out)]
++            # PE has no position-independent mode; newer clang rejects -fPIC there.
++            argv += ["-shared", *([] if IS_WINDOWS else ["-fPIC"]), *map(str, sources), "-o", str(out)]
+         r = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+         return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
+ 
+diff --git a/src/ast.h b/src/ast.h
+index caffe48..fb6cf94 100644
+--- a/src/ast.h
++++ b/src/ast.h
+@@ -1489,6 +1489,7 @@ struct SFunction {
+     // check left in any copy of the body is an error (bce.h).
+     bool checkfree = false;
+     bool isthread = false;
++    bool iscuda = false;        // Declared with `cuda`: a kernel nvcc compiles for the GPU.
+     bool isextern = false;      // A C function behind a Goose signature (§7.10); no body.
+     bool isexport = false;      // A Goose function exposed through a C ABI wrapper.
+     string cname;               // Its C symbol (the Goose name unless spelled out).
 diff --git a/src/builtins.h b/src/builtins.h
-index 2242444..83ca1ef 100644
+index 2242444..ce2a278 100644
 --- a/src/builtins.h
 +++ b/src/builtins.h
-@@ -91,9 +91,16 @@ inline int RecvKindOf(TypeExpr *t) {
+@@ -91,9 +91,42 @@ inline int RecvKindOf(TypeExpr *t) {
      F(B_FROM_BYTES,       "from_bytes",       1,  1,   "",   "",  0,              "",            BF_TYARGS) \
      F(B_EMBED_SHADER,     "embed_shader",     1, 99,   "",   "",  0,              "",            0) \
      F(B_EMBED_FILE,       "embed_file",       1,  1,   "",   "",  0,              "",            0) \
@@ -75,6 +101,32 @@ index 2242444..83ca1ef 100644
 +    F(B_DOT_QUADS_I,      "dot_quads_i",      3,  3,   "",   "",  0,              "",            0) \
 +    F(B_MADD16,           "madd16",           2,  2,   "",   "",  0,              "",            0) \
 +    F(B_DOT_BYTES,        "dot_bytes",        2,  3,   "",   "",  0,              "",            0) \
++    F(B_CUDA_LAUNCH,      "cuda_launch",      3, 99,   "",   "",  0,              "",            0) \
++    F(B_CUDA_ALLOC,       "cuda_alloc",       1,  1,   "",   "",  0,              "",            BF_TYARGS) \
++    F(B_CUDA_COPY_IN,     "cuda_copy_in",     2,  2,   "",   "",  0,              "",            0) \
++    F(B_CUDA_COPY_OUT,    "cuda_copy_out",    2,  2,   "",   "",  0,              "",            0) \
++    F(B_CUDA_THREAD,      "cuda_thread",      0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_BLOCK,       "cuda_block",       0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_BLOCK_DIM,   "cuda_block_dim",   0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_GRID_DIM,    "cuda_grid_dim",    0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_SYNC,        "cuda_sync",        0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_SHARED,      "cuda_shared",      1,  1,   "",   "",  0,              "",            BF_TYARGS) \
++    F(B_CUDA_SHFL_XOR,    "cuda_shfl_xor",    2,  2,   "",   "",  0,              "",            0) \
++    F(B_CUDA_DP4A,        "cuda_dp4a",        3,  3,   "",   "",  0,              "",            0) \
++    F(B_CUDA_H2F,         "cuda_h2f",         1,  1,   "",   "",  0,              "",            0) \
++    F(B_CUDA_F2H,         "cuda_f2h",         1,  1,   "",   "",  0,              "",            0) \
++    F(B_CUDA_ATOMIC_ADD,  "cuda_atomic_add",  3,  3,   "",   "",  0,              "",            0) \
++    F(B_CUDA_FENCE,       "cuda_fence",       0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_MMA,         "cuda_mma",         3,  3,   "",   "",  0,              "",            0) \
++    F(B_CUDA_MMA16,       "cuda_mma16",       3,  3,   "",   "",  0,              "",            0) \
++    F(B_CUDA_MMAH,        "cuda_mmah",        3,  3,   "",   "",  0,              "",            0) \
++    F(B_CUDA_F2H2,        "cuda_f2h2",        2,  2,   "",   "",  0,              "",            0) \
++    F(B_CUDA_LD4,         "cuda_ld4",         2,  2,   "",   "",  0,              "",            0) \
++    F(B_CUDA_LDSM4,       "cuda_ldsm4",       2,  2,   "",   "",  0,              "",            0) \
++    F(B_CUDA_CP_ASYNC,    "cuda_cp_async",    4,  4,   "",   "",  0,              "",            0) \
++    F(B_CUDA_CP_ASYNC4,   "cuda_cp_async4",   4,  4,   "",   "",  0,              "",            0) \
++    F(B_CUDA_CP_COMMIT,   "cuda_cp_commit",   0,  0,   "",   "",  0,              "",            0) \
++    F(B_CUDA_CP_WAIT,     "cuda_cp_wait",     1,  1,   "",   "",  0,              "",            0) \
      F(B_LEN,              "len",              1,  1,   "",   "i", BR_ANY,         "",            BF_MEMBER | BF_PROPERTY) \
      F(B_CAP,              "cap",              1,  1,   "",   "i", BR_LIMITED,     "",            BF_MEMBER | BF_PROPERTY) \
      F(B_INDEX_OF,         "index_of",         2,  2,   "",   "i", BR_INDEXABLE,   "",            BF_MEMBER) \
@@ -83,10 +135,24 @@ index 2242444..83ca1ef 100644
      F(B_CHECK_LENGTH,     "check_length",     2,  3,   "i",  "i", BR_GROW | BR_GROWSHRINK, "",     BF_MEMBER) \
      F(B_PUSH,             "push",             2,  2,   "e",  "r", BR_GROWABLE,    "push into",   BF_MEMBER | BF_WRITE) \
 diff --git a/src/codegen.h b/src/codegen.h
-index fec8c3e..0be9bc0 100644
+index fec8c3e..8436ef3 100644
 --- a/src/codegen.h
 +++ b/src/codegen.h
-@@ -1469,7 +1469,7 @@ struct CodeGen {
+@@ -171,6 +171,13 @@ struct CodeGen {
+     string code;        // Function bodies, size/eq helpers, thunks, main.
+     string exportprotos;
+     bool usesthreads = false;
++    // cuda fn kernels and device copies of what they call, compiled by nvcc
++    // (cuda.h); cudaemit is 1 while a kernel is emitted, 2 for a callee.
++    string cucode, cuprotos;
++    set<FnSpec *> devspecs, hostspecs;
++    int cudaemit = 0;
++    bool usescuda = false;
++    void FindDeviceSpecs();
+     bool library = false;
+     // Measurement only, and unsound: emit the whole `return ... from`
+     // machinery but none of the post-call discriminant checks, so a program
+@@ -1469,7 +1476,7 @@ struct CodeGen {
      void EmitSpec(FnSpec *sp, bool er = false);
      // The instruction-set levels above the baseline a simd function has a
      // version for; runtime.h names them (GS_SIMD_TARGET1, ...).
@@ -95,14 +161,232 @@ index fec8c3e..0be9bc0 100644
      void EmitSimdVersions(FnSpec *sp, const string &name, const string &params,
                            const string &fnbody);
  
+@@ -1533,11 +1540,25 @@ struct CodeGen {
+         if (!fromids.empty()) data += "static GS_TLS int32_t gs_rf;\n";
+         EmitGlobalDecls();
+         // Prototypes for every live specialization, then their bodies.
++        FindDeviceSpecs();
+         for (auto sp : livespecs) {
++            if (!hostspecs.count(sp)) continue;
+             auto ret = SigRet(sp), params = SigParams(sp, false);
+             Append(protos, "static ", FnAttrs(sp), ret, " ", sinfo[sp].cname, "(", params, ");\n");
+         }
+-        for (auto sp : livespecs) EmitSpec(sp);
++        for (auto sp : livespecs) if (hostspecs.count(sp)) EmitSpec(sp);
++        for (auto sp : livespecs) {
++            if (!devspecs.count(sp)) continue;
++            cudaemit = sp->sf->iscuda ? 1 : 2;
++            if (cudaemit == 2) {
++                auto ret = SigRet(sp);
++                auto ps = SigParams(sp, false);
++                Append(cuprotos, "static __device__ ", ret, " ", sinfo[sp].cname, "(", ps, ");\n");
++            }
++            EmitSpec(sp);
++            cudaemit = 0;
++        }
++        if (usescuda || !devspecs.empty()) data += "@@GS_CUDA_PTX@@\n";
+         EmitGlobalInit();
+         // Element-run twins requested by call sites, the globals'
+         // initializers included (may request more).
 diff --git a/src/codegen_builtins.h b/src/codegen_builtins.h
-index f3e9b23..5c66afb 100644
+index f3e9b23..65e54af 100644
 --- a/src/codegen_builtins.h
 +++ b/src/codegen_builtins.h
-@@ -132,6 +132,51 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+@@ -132,6 +132,242 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
              return { tv };
          }
          case B_HARDWARE_THREADS: return { "gs_hardware_threads()" };
++        case B_CUDA_THREAD: return { "((int64_t)threadIdx.x)" };
++        case B_CUDA_BLOCK: return { "((int64_t)blockIdx.x)" };
++        case B_CUDA_BLOCK_DIM: return { "((int64_t)blockDim.x)" };
++        case B_CUDA_GRID_DIM: return { "((int64_t)gridDim.x)" };
++        case B_CUDA_SYNC: L("__syncthreads();"); return {};
++        case B_CUDA_SHARED: {
++            auto n = Is<IntLit>(an[0]);
++            if (!n) Fail(ln, "cuda_shared<T>(n) takes a positive integer literal");
++            auto a = T(), t = T();
++            L("__shared__ __align__(16) ", CT(c->qtype), " ", a, "[", n->val, "];");
++            L(CT(c->rettypes[0]), " ", t, "; ", t, ".data = ", a, "; ", t, ".len = ", n->val, ";");
++            return { t };
++        }
++        case B_CUDA_SHFL_XOR: {
++            auto x = GenX(an[0]);
++            auto m = GenX(an[1]);
++            auto t = T();
++            L(CT(c->rettypes.empty() ? an[0]->exprtype : c->rettypes[0]), " ", t,
++              " = __shfl_xor_sync(0xffffffffu, ", x, ", (int)(", m, "));");
++            return { t };
++        }
++        case B_CUDA_FENCE: L("__threadfence();"); return {};
++        case B_CUDA_CP_COMMIT: L("asm volatile(\"cp.async.commit_group;\");"); return {};
++        case B_CUDA_CP_WAIT: {
++            auto n = Is<IntLit>(an[0]);
++            if (!n) Fail(ln, "cuda_cp_wait(n) takes a literal");
++            L("asm volatile(\"cp.async.wait_group ", n->val, ";\");");
++            return {};
++        }
++        case B_CUDA_CP_ASYNC: case B_CUDA_CP_ASYNC4: {
++            auto dsl = GenPure(an[0]);
++            auto di = GenX(an[1]);
++            auto ssl = GenPure(an[2]);
++            auto si = GenX(an[3]);
++            auto sa = T();
++            // Elements of 4 bytes: one of them (cp.async.ca, 4); else 16 bytes.
++            auto one = c->builtin == B_CUDA_CP_ASYNC4;
++            L("unsigned ", sa, " = (unsigned)__cvta_generic_to_shared(", dsl, ".data + (", di, "));");
++            L("asm volatile(\"", one ? "cp.async.ca.shared.global [%0], [%1], 4;" : "cp.async.cg.shared.global [%0], [%1], 16;",
++              "\" :: \"r\"(", sa, "), \"l\"(", ssl, ".data + (", si, ")));");
++            return {};
++        }
++        case B_CUDA_MMA: case B_CUDA_MMA16: {
++            auto k16 = c->builtin == B_CUDA_MMA16;
++            auto a = LoadLoc(GenLoc(an[0]), an[0]->exprtype, ln);
++            auto b = k16 ? GenX(an[1]) : LoadLoc(GenLoc(an[1]), an[1]->exprtype, ln);
++            auto acc = LoadLoc(GenLoc(an[2]), an[2]->exprtype, ln);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            auto ra = T(), rb = T(), rc = T();
++            L(CT(an[0]->exprtype), " ", ra, " = ", a, ";");
++            L(CT(an[2]->exprtype), " ", rc, " = ", acc, ";");
++            if (k16) {
++                L("int ", rb, " = (int)(", b, ");");
++                L("asm(\"mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5}, {%6}, "
++                  "{%7,%8,%9,%10};\" : \"=r\"(", tv, ".e[0]), \"=r\"(", tv, ".e[1]), \"=r\"(", tv, ".e[2]), \"=r\"(", tv,
++                  ".e[3]) : \"r\"(", ra, ".e[0]), \"r\"(", ra, ".e[1]), \"r\"(", rb, "), \"r\"(", rc, ".e[0]), \"r\"(", rc,
++                  ".e[1]), \"r\"(", rc, ".e[2]), \"r\"(", rc, ".e[3]));");
++            } else {
++                L(CT(an[1]->exprtype), " ", rb, " = ", b, ";");
++                L("asm(\"mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
++                  "{%8,%9}, {%10,%11,%12,%13};\" : \"=r\"(", tv, ".e[0]), \"=r\"(", tv, ".e[1]), \"=r\"(", tv, ".e[2]), \"=r\"(",
++                  tv, ".e[3]) : \"r\"(", ra, ".e[0]), \"r\"(", ra, ".e[1]), \"r\"(", ra, ".e[2]), \"r\"(", ra, ".e[3]), \"r\"(", rb,
++                  ".e[0]), \"r\"(", rb, ".e[1]), \"r\"(", rc, ".e[0]), \"r\"(", rc, ".e[1]), \"r\"(", rc, ".e[2]), \"r\"(", rc,
++                  ".e[3]));");
++            }
++            return { tv };
++        }
++        case B_CUDA_MMAH: {
++            auto a = LoadLoc(GenLoc(an[0]), an[0]->exprtype, ln);
++            auto b = LoadLoc(GenLoc(an[1]), an[1]->exprtype, ln);
++            auto acc = LoadLoc(GenLoc(an[2]), an[2]->exprtype, ln);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            auto ra = T(), rb = T(), rc = T();
++            L(CT(an[0]->exprtype), " ", ra, " = ", a, ";");
++            L(CT(an[1]->exprtype), " ", rb, " = ", b, ";");
++            L(CT(an[2]->exprtype), " ", rc, " = ", acc, ";");
++            L("asm(\"mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
++              "{%8,%9}, {%10,%11,%12,%13};\" : \"=f\"(", tv, ".e[0]), \"=f\"(", tv, ".e[1]), \"=f\"(", tv, ".e[2]), \"=f\"(",
++              tv, ".e[3]) : \"r\"(", ra, ".e[0]), \"r\"(", ra, ".e[1]), \"r\"(", ra, ".e[2]), \"r\"(", ra, ".e[3]), \"r\"(", rb,
++              ".e[0]), \"r\"(", rb, ".e[1]), \"f\"(", rc, ".e[0]), \"f\"(", rc, ".e[1]), \"f\"(", rc, ".e[2]), \"f\"(", rc,
++              ".e[3]));");
++            return { tv };
++        }
++        case B_CUDA_LDSM4: {
++            auto sl = GenPure(an[0]);
++            auto i = GenX(an[1]);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            L("{ unsigned a_ = (unsigned)__cvta_generic_to_shared(", sl, ".data + (", i, ")); asm volatile(\"ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
++              "{%0,%1,%2,%3}, [%4];\" : \"=r\"(", tv, ".e[0]), \"=r\"(", tv, ".e[1]), \"=r\"(", tv, ".e[2]), \"=r\"(", tv,
++              ".e[3]) : \"r\"(a_)); }");
++            return { tv };
++        }
++        case B_CUDA_LD4: {
++            auto sl = GenPure(an[0]);
++            auto i = GenX(an[1]);
++            auto tv = T();
++            FixedLocal(c->rettypes[0], tv);
++            L("{ int4 v_ = __ldg((const int4 *)(", sl, ".data + (", i, "))); ", tv, ".e[0] = v_.x; ", tv, ".e[1] = v_.y; ",
++              tv, ".e[2] = v_.z; ", tv, ".e[3] = v_.w; }");
++            return { tv };
++        }
++        case B_CUDA_F2H2: {
++            auto x = GenX(an[0]), y = GenX(an[1]);
++            auto t = T();
++            L("gs_i32 ", t, "; { __half2 h_ = __floats2half2_rn((float)(", x, "), (float)(", y, ")); ", t,
++              " = (gs_i32)*(unsigned *)&h_; }");
++            return { t };
++        }
++        case B_CUDA_ATOMIC_ADD: {
++            auto s = GenPure(an[0]);
++            auto i = GenX(an[1]);
++            auto v = GenX(an[2]);
++            auto t = T();
++            L("gs_i32 ", t, " = atomicAdd((int *)", s, ".data + (", i, "), (int)(", v, "));");
++            return { t };
++        }
++        case B_CUDA_H2F: {
++            auto t = T();
++            L("gs_f32 ", t, " = __half2float(__ushort_as_half((unsigned short)(", GenX(an[0]), ")));");
++            return { t };
++        }
++        case B_CUDA_F2H: {
++            auto t = T();
++            L("gs_u16 ", t, " = __half_as_ushort(__float2half_rn((float)(", GenX(an[0]), ")));");
++            return { t };
++        }
++        case B_CUDA_DP4A: {
++            auto a = GenX(an[0]), b = GenX(an[1]), k = GenX(an[2]);
++            auto t = T();
++            L("gs_i32 ", t, " = __dp4a((int)(", a, "), (int)(", b, "), (int)(", k, "));");
++            return { t };
++        }
++        case B_CUDA_ALLOC: {
++            usescuda = true;
++            auto t = T();
++            auto n = GenX(an[0]);
++            auto at = LocArgs(ln);
++            L("uint64_t ", t, " = gs_cuda_alloc((", n, ") * ", FixedSize(c->qtype), ", ", at, ");");
++            return { t };
++        }
++        case B_CUDA_COPY_IN: case B_CUDA_COPY_OUT: {
++            usescuda = true;
++            auto in = c->builtin == B_CUDA_COPY_IN;
++            auto si = in ? 1 : 0;
++            auto first = in ? GenX(an[0]) : GenPure(an[0]);
++            auto p = T();
++            if (in) L("uint64_t ", p, " = ", first, ";");
++            auto s = in ? GenPure(an[1]) : first;
++            if (!in) L("uint64_t ", p, " = ", GenX(an[1]), ";");
++            auto sz = FixedSize(an[si]->exprtype->sub);
++            L(in ? "gs_cuda_htod(" : "gs_cuda_dtoh(", p, ", ", s, ".data, ", s, ".len * ", sz, ", ",
++              LocArgs(ln), ");");
++            return {};
++        }
++        case B_CUDA_LAUNCH: {
++            usescuda = true;
++            auto sp = c->spec;
++            auto blocks = T(), threads = T();
++            L("int64_t ", blocks, " = ", GenX(an[1]), ";");
++            L("int64_t ", threads, " = ", GenX(an[2]), ";");
++            string ptrs;
++            for (size_t i = 0; i < sp->argtypes.size(); i++) {
++                auto pt = sp->argtypes[i];
++                if (pt->kind == TY_SLICE) {
++                    auto lv = GenLoc(an[3 + i]);
++                    if (lv.t->kind == TY_REF) DerefLoc(lv);
++                    auto si = SI(lv.t);
++                    auto p = T(), n = T();
++                    L("uint64_t ", p, " = ", LoadLoc(FieldLocAt(lv, 0), si->ftypes[0], ln), ";");
++                    L("int64_t ", n, " = ", LoadLoc(FieldLocAt(lv, 1), si->ftypes[1], ln), ";");
++                    Append(ptrs, ptrs.empty() ? "" : ", ", "&", p, ", &", n);
++                } else {
++                    auto t = T();
++                    auto ct = CT(pt);
++                    auto x = GenX(an[3 + i]);
++                    L(ct, " ", t, " = ", x, ";");
++                    Append(ptrs, ptrs.empty() ? "" : ", ", "&", t);
++                }
++            }
++            auto fn = Unique("gs_cuk");
++            Append(data, "static void *", fn, ";\n");
++            auto args = T();
++            if (ptrs.empty()) L("void **", args, " = 0;");
++            else L("void *", args, "[] = { ", ptrs, " };");
++            L("gs_cuda_launch(&", fn, ", ", CStr(string(sinfo[sp].cname)), ", gs_cuda_ptx, ", blocks, ", ",
++              threads, ", ", args, ", ", LocArgs(ln), ");");
++            return {};
++        }
 +        case B_DOT_QUADS_I: {
 +            auto at = an[0]->exprtype;
 +            auto a = LoadLoc(GenLoc(an[0]), at, ln);
@@ -151,7 +435,7 @@ index f3e9b23..5c66afb 100644
          case B_EMBED_SHADER:
          case B_EMBED_FILE: {
              auto &blob = *c->shaderblob;
-@@ -247,7 +292,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+@@ -247,7 +483,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                  L(cnt, " = *(gs_i64 *)(", nn, " + 1);");
                  L("GS_MEMCPY(", Top(stk), ", ", image, ", (size_t)", n, ");");
                  Bump(stk, n);
@@ -160,7 +444,7 @@ index f3e9b23..5c66afb 100644
                  ind--;
                  L("}");
                  return poll ? vector<string> { hv, got } : vector<string> { hv };
-@@ -267,7 +312,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+@@ -267,7 +503,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                  ind++;
                  L("GS_MEMCPY(", Top(stk), ", ", nn, " + 1, (size_t)", nn, "->size);");
                  Bump(stk, cat(nn, "->size"));
@@ -169,7 +453,7 @@ index f3e9b23..5c66afb 100644
                  ind--;
                  if (poll) {
                      // A missed poll still yields a valid (zero) value.
-@@ -286,19 +331,28 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
+@@ -286,19 +522,28 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                  // A value of no bytes (§3.4): the node holds none to fill the
                  // object C gives it.
                  L("GS_MEMZERO(&", tv, ", sizeof(", tv, "));");
@@ -202,7 +486,7 @@ index f3e9b23..5c66afb 100644
              // The checker proved the reference is an element of this very
              // array (§3.3), so the distance is a whole number of elements
 diff --git a/src/codegen_emit.h b/src/codegen_emit.h
-index 107607b..be24ffa 100644
+index 107607b..f474d24 100644
 --- a/src/codegen_emit.h
 +++ b/src/codegen_emit.h
 @@ -581,13 +581,15 @@ inline void CodeGen::EmitSimdVersions(FnSpec *sp, const string &name, const stri
@@ -224,8 +508,529 @@ index 107607b..be24ffa 100644
      }
      Append(code, "static ", ret, " ", name, "(", params, ") {\n",
             "#if GS_SIMD >= 1\n    switch (gs_simd_level()) {\n");
+@@ -704,7 +706,13 @@ inline void CodeGen::EmitSpec(FnSpec *sp, bool er) {
+         Append(fnbody, "    uint8_t *", p.second, " = ", gnames[p.first], ".base;\n");
+     fnbody += bodyout;
+     auto name = er ? ernames[sp] : curinfo->cname;
+-    if (sp->sf->issimd) EmitSimdVersions(sp, name, params, fnbody);
++    if (cudaemit) {
++        if (curinfo->needssp || !curinfo->freevars.empty() || !curinfo->globals.empty())
++            Fail(sp->sf->line, cat(sp->sf->name, " runs on the GPU", cudaemit == 2 ? " (a cuda fn calls it)" : "",
++                                   ": it cannot allocate or reach globals"));
++        Append(cucode, cudaemit == 1 ? "extern \"C\" __global__ " : "static __device__ ", SigRet(sp), " ",
++               name, "(", params, ") {\n", fnbody, "}\n\n");
++    } else if (sp->sf->issimd) EmitSimdVersions(sp, name, params, fnbody);
+     else Append(code, "static ", FnAttrs(sp), SigRet(sp), " ", name, "(", params, ") {\n", fnbody,
+                 "}\n\n");
+     curspec = nullptr;
+diff --git a/src/codegen_frames.h b/src/codegen_frames.h
+index 52a3692..e85e86f 100644
+--- a/src/codegen_frames.h
++++ b/src/codegen_frames.h
+@@ -487,10 +487,48 @@ inline vector<pair<string, string>> CodeGen::ParamFields(TypeExpr *t, bool pool)
+         return { { "gs_rhdr *", "hdr" }, { "gs_stack *", "stk" }, { "gs_rhdr *", "fl" },
+                  { "gs_stack *", "flstk" } };
+     if (IsFatRef(t)) return { { "gs_rhdr *", "hdr" }, { "gs_stack *", "stk" } };
+-    if (t->kind == TY_SLICE) return { { "void *", "data" }, { "int64_t ", "len" } };
++    if (t->kind == TY_SLICE)
++        return { { cudaemit ? cat(CT(t->sub), " *") : string("void *"), "data" }, { "int64_t ", "len" } };
+     return {};
+ }
+ 
++// The kernels and every specialization a kernel's body calls, which get a
++// device copy (cuda.h).
++inline void CodeGen::FindDeviceSpecs() {
++    vector<FnSpec *> work;
++    for (auto sp : livespecs) if (sp->sf->iscuda) work.push_back(sp);
++    while (!work.empty()) {
++        auto sp = work.back();
++        work.pop_back();
++        if (!devspecs.insert(sp).second) continue;
++        function<void(Node *)> walk = [&](Node *n) {
++            if (!n) return;
++            if (auto c = Is<Call>(n)) {
++                if (c->spec && c->builtin < 0 && sinfo.count(c->spec)) work.push_back(c->spec);
++                for (auto k : c->dispatch) if (sinfo.count(k)) work.push_back(k);
++            }
++            RunChildren(n, walk);
++        };
++        walk(sp->body);
++    }
++    // What host code reaches, a kernel's callees among it, keeps its host form.
++    for (auto sp : livespecs) if (!devspecs.count(sp)) work.push_back(sp);
++    while (!work.empty()) {
++        auto sp = work.back();
++        work.pop_back();
++        if (sp->sf->iscuda || !hostspecs.insert(sp).second) continue;
++        function<void(Node *)> walk = [&](Node *n) {
++            if (!n) return;
++            if (auto c = Is<Call>(n)) {
++                if (c->spec && c->builtin < 0 && sinfo.count(c->spec)) work.push_back(c->spec);
++                for (auto k : c->dispatch) if (sinfo.count(k)) work.push_back(k);
++            }
++            RunChildren(n, walk);
++        };
++        walk(sp->body);
++    }
++}
++
+ // An argument for a parameter of type t: its members where ParamFields
+ // passes it so, read from a temporary unless it is a variable already.
+ inline void CodeGen::PushArg(vector<string> &args, TypeExpr *t, bool pool, const string &v) {
+diff --git a/src/cuda.h b/src/cuda.h
+new file mode 100644
+index 0000000..ce386ca
+--- /dev/null
++++ b/src/cuda.h
+@@ -0,0 +1,229 @@
++// Goose compiler — cuda fn kernels: the device prelude the emitted kernels
++// compile against, and the nvcc step that turns them into the PTX a program
++// carries and the driver loads (runtime_os.h, gs_cuda_*).
++#pragma once
++
++namespace goose {
++
++// What the kernels' C needs of runtime.h, in the release forms, on the
++// device: nvcc compiles it as C++, so slices take typed pointers.
++inline const char *cuda_prelude = R"GSCU(
++#include <stdint.h>
++#include <cuda_fp16.h>
++typedef int16_t gs_i16;
++typedef int32_t gs_i32;
++typedef int64_t gs_i64;
++typedef uint16_t gs_u16;
++typedef uint32_t gs_u32;
++typedef uint64_t gs_u64;
++typedef float gs_f32;
++typedef double gs_f64;
++typedef struct { int8_t *data; int64_t len; } sl_i8;
++typedef struct { uint8_t *data; int64_t len; } sl_u8;
++typedef struct { gs_i16 *data; int64_t len; } sl_i16;
++typedef struct { gs_u16 *data; int64_t len; } sl_u16;
++typedef struct { gs_i32 *data; int64_t len; } sl_i32;
++typedef struct { gs_u32 *data; int64_t len; } sl_u32;
++typedef struct { gs_i64 *data; int64_t len; } sl_i64;
++typedef struct { gs_u64 *data; int64_t len; } sl_u64;
++typedef struct { gs_f32 *data; int64_t len; } sl_f32;
++typedef struct { gs_f64 *data; int64_t len; } sl_f64;
++#ifdef GS_CUDA_UNCHECKED
++#define GS_IDX(i, n, f, l) (i)
++#else
++#define GS_IDX(i, n, f, l) ((uint64_t)(i) < (uint64_t)(n) ? (i) : (__trap(), (int64_t)0))
++#endif
++#define GS_UNREACHABLE(f, l) __builtin_unreachable()
++#define GS_LIKELY(x) (x)
++#define GS_UNLIKELY(x) (x)
++#define GS_MEMCPY memcpy
++static __device__ __forceinline__ void gs_prefetch(const void *p, int64_t len, int64_t esz, int64_t i, int64_t n) {
++    if (i < 0) { n += i; i = 0; }
++    if (n > len - i) n = len - i;
++    if (n <= 0 || esz <= 0) return;
++    const char *b = (const char *)p + i * esz;
++    for (int64_t o = 0; o < n * esz; o += 128) asm volatile("prefetch.global.L2::evict_last [%0];" :: "l"(b + o));
++}
++#define gs_f2iwrap(d) ((int64_t)(d))
++#define GS_RANGE(v, lo, hi, t, f, l) (v)
++#define GS_RANGE_U(v, hi, t, f, l)   (v)
++#define GS_F2I(d, s, lo, hi, t, f, l) gs_f2iwrap(d)
++#define GS_F2U(d, s, f, l)            ((uint64_t)gs_f2iwrap(d))
++#define gs_divfail(f, l) __trap()
++#define gs_divovf(f, l) __trap()
++#define GS_DIVU(T, a, b, f, l) \
++    ((T)(b) ? (T)((T)(a) / (T)(b)) : (gs_divfail((f), (l)), (T)0))
++#define GS_MODU(T, a, b, f, l) \
++    ((T)(b) ? (T)((T)(a) % (T)(b)) : (gs_divfail((f), (l)), (T)0))
++#define GS_DIVS(T, a, b, f, l) \
++    ((T)(b) ? (T)((int64_t)(T)(a) / (int64_t)(T)(b)) : (gs_divfail((f), (l)), (T)0))
++#define GS_MODS(T, t, a, b, f, l) \
++    ((T)(b) == 0 ? (gs_divfail((f), (l)), (T)0) \
++     : (T)(((t) = (int64_t)(T)(a) % (int64_t)(T)(b)) < 0 \
++               ? (t) + ((T)(b) < 0 ? -(int64_t)(T)(b) : (int64_t)(T)(b)) : (t)))
++#define gs_div_u8(a, b, f, l)  GS_DIVU(uint8_t, a, b, f, l)
++#define gs_div_u16(a, b, f, l) GS_DIVU(uint16_t, a, b, f, l)
++#define gs_div_u32(a, b, f, l) GS_DIVU(uint32_t, a, b, f, l)
++#define gs_div_u64(a, b, f, l) GS_DIVU(uint64_t, a, b, f, l)
++#define gs_mod_u8(a, b, f, l)  GS_MODU(uint8_t, a, b, f, l)
++#define gs_mod_u16(a, b, f, l) GS_MODU(uint16_t, a, b, f, l)
++#define gs_mod_u32(a, b, f, l) GS_MODU(uint32_t, a, b, f, l)
++#define gs_mod_u64(a, b, f, l) GS_MODU(uint64_t, a, b, f, l)
++#define gs_mod_i8(t, a, b, f, l)  GS_MODS(int8_t, t, a, b, f, l)
++#define gs_mod_i16(t, a, b, f, l) GS_MODS(int16_t, t, a, b, f, l)
++#define gs_mod_i32(t, a, b, f, l) GS_MODS(int32_t, t, a, b, f, l)
++#define gs_div_i8(a, b, f, l)  GS_DIVS(int8_t, a, b, f, l)
++#define gs_div_i16(a, b, f, l) GS_DIVS(int16_t, a, b, f, l)
++#define gs_div_i32(a, b, f, l) GS_DIVS(int32_t, a, b, f, l)
++#define gs_div_i64(a, b, f, l) \
++    ((int64_t)(b) == 0 ? (gs_divfail((f), (l)), (int64_t)0) \
++     : (int64_t)(a) == INT64_MIN && (int64_t)(b) == -1 ? (gs_divovf((f), (l)), (int64_t)0) \
++     : (int64_t)(a) / (int64_t)(b))
++#define gs_mod_i64(t, a, b, f, l) \
++    ((int64_t)(b) == 0 ? (gs_divfail((f), (l)), (int64_t)0) \
++     : (int64_t)(b) == -1 ? (int64_t)0 \
++     : ((t) = (int64_t)(a) % (int64_t)(b)) < 0 \
++         ? (int64_t)((uint64_t)(t) + ((int64_t)(b) < 0 ? 0u - (uint64_t)(int64_t)(b) \
++                                                       : (uint64_t)(int64_t)(b))) \
++         : (t))
++#define gs_add_i8(a, b, f, l)  ((int8_t)((int64_t)(a) + (int64_t)(b)))
++#define gs_sub_i8(a, b, f, l)  ((int8_t)((int64_t)(a) - (int64_t)(b)))
++#define gs_mul_i8(a, b, f, l)  ((int8_t)((int64_t)(a) * (int64_t)(b)))
++#define gs_neg_i8(a, f, l)     ((int8_t)(-(int64_t)(a)))
++#define gs_shl_i8(a, n)  ((int8_t)((uint64_t)(a) << ((n) & 7)))
++#define gs_shr_i8(a, n)  ((int8_t)((int64_t)(a) >> ((n) & 7)))
++#define gs_add_i16(a, b, f, l) ((int16_t)((int64_t)(a) + (int64_t)(b)))
++#define gs_sub_i16(a, b, f, l) ((int16_t)((int64_t)(a) - (int64_t)(b)))
++#define gs_mul_i16(a, b, f, l) ((int16_t)((int64_t)(a) * (int64_t)(b)))
++#define gs_neg_i16(a, f, l)    ((int16_t)(-(int64_t)(a)))
++#define gs_shl_i16(a, n) ((int16_t)((uint64_t)(a) << ((n) & 15)))
++#define gs_shr_i16(a, n) ((int16_t)((int64_t)(a) >> ((n) & 15)))
++#define gs_add_i32(a, b, f, l) ((int32_t)((uint32_t)(a) + (uint32_t)(b)))
++#define gs_sub_i32(a, b, f, l) ((int32_t)((uint32_t)(a) - (uint32_t)(b)))
++#define gs_mul_i32(a, b, f, l) ((int32_t)((uint32_t)(a) * (uint32_t)(b)))
++#define gs_neg_i32(a, f, l)    ((int32_t)(0u - (uint32_t)(a)))
++#define gs_shl_i32(a, n) ((int32_t)((uint32_t)(a) << ((n) & 31)))
++#define gs_shr_i32(a, n) ((int32_t)((int32_t)(a) >> ((n) & 31)))
++#define gs_add_u8(a, b)  ((uint8_t)((a) + (b)))
++#define gs_sub_u8(a, b)  ((uint8_t)((a) - (b)))
++#define gs_mul_u8(a, b)  ((uint8_t)((uint32_t)(a) * (uint32_t)(b)))
++#define gs_shl_u8(a, n)  ((uint8_t)((uint32_t)(a) << ((n) & 7)))
++#define gs_shr_u8(a, n)  ((uint8_t)((uint32_t)(a) >> ((n) & 7)))
++#define gs_add_u16(a, b) ((uint16_t)((a) + (b)))
++#define gs_sub_u16(a, b) ((uint16_t)((a) - (b)))
++#define gs_mul_u16(a, b) ((uint16_t)((uint32_t)(a) * (uint32_t)(b)))
++#define gs_shl_u16(a, n) ((uint16_t)((uint32_t)(a) << ((n) & 15)))
++#define gs_shr_u16(a, n) ((uint16_t)((uint32_t)(a) >> ((n) & 15)))
++#define gs_add_u32(a, b) ((uint32_t)((a) + (b)))
++#define gs_sub_u32(a, b) ((uint32_t)((a) - (b)))
++#define gs_mul_u32(a, b) ((uint32_t)((uint32_t)(a) * (uint32_t)(b)))
++#define gs_shl_u32(a, n) ((uint32_t)((uint32_t)(a) << ((n) & 31)))
++#define gs_shr_u32(a, n) ((uint32_t)((uint32_t)(a) >> ((n) & 31)))
++#define gs_add_i64(a, b, f, l) ((int64_t)((uint64_t)(a) + (uint64_t)(b)))
++#define gs_sub_i64(a, b, f, l) ((int64_t)((uint64_t)(a) - (uint64_t)(b)))
++#define gs_mul_i64(a, b, f, l) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
++#define gs_neg_i64(a, f, l)    ((int64_t)(0u - (uint64_t)(a)))
++#define gs_shl_i64(a, n) ((int64_t)((uint64_t)(a) << ((n) & 63)))
++#define gs_shr_i64(a, n) ((int64_t)((a) >> ((n) & 63)))
++#define gs_add_u64(a, b) ((uint64_t)((a) + (b)))
++#define gs_sub_u64(a, b) ((uint64_t)((a) - (b)))
++#define gs_mul_u64(a, b) ((uint64_t)((a) * (b)))
++#define gs_shl_u64(a, n) ((uint64_t)((a) << ((n) & 63)))
++#define gs_shr_u64(a, n) ((uint64_t)((a) >> ((n) & 63)))
++#define gs_sqrt sqrt
++#define gs_sqrtf sqrtf
++#define gs_sin sin
++#define gs_sinf sinf
++#define gs_cos cos
++#define gs_cosf cosf
++#define gs_tan tan
++#define gs_tanf tanf
++#define gs_asin asin
++#define gs_asinf asinf
++#define gs_acos acos
++#define gs_acosf acosf
++#define gs_atan atan
++#define gs_atanf atanf
++#define gs_atan2 atan2
++#define gs_atan2f atan2f
++#define gs_exp exp
++#define gs_expf expf
++#define gs_log log
++#define gs_logf logf
++#define gs_log2 log2
++#define gs_log2f log2f
++#define gs_log10 log10
++#define gs_log10f log10f
++#define gs_pow pow
++#define gs_powf powf
++#define gs_mul_add fma
++#define gs_mul_addf fmaf
++#define gs_round_even rint
++#define gs_round_evenf rintf
++#define gs_f32_from_bits(b) __uint_as_float((unsigned)(b))
++)GSCU";
++
++// The runtime and helper names emitted kernels may use, all of which the
++// prelude defines; any other gs_ name is something with no device form.
++inline bool CudaKnownName(string_view n) {
++    static const string pre = cuda_prelude;
++    return pre.find(cat(" ", n, " ")) != string::npos || pre.find(cat(" ", n, "(")) != string::npos ||
++           pre.find(cat(" ", n, ";")) != string::npos || pre.find(cat("define ", n, "\n")) != string::npos;
++}
++
++// nvcc, from CUDA_PATH or PATH; "" for none.
++inline string NvccPath() {
++    if (auto cp = getenv("CUDA_PATH")) {
++        auto p = cat(cp, "/bin/nvcc");
++        #ifdef _WIN32
++            p += ".exe";
++        #endif
++        if (PathExists(p)) return p;
++    }
++    return FindOnPath("nvcc");
++}
++
++// Compiles the kernels in `cu` to PTX at `stem`.ptx, for the GPU this machine
++// has unless GOOSE_CUDA_ARCH names another (sm_89, compute_80, ...).
++inline bool BuildCuda(const string &cu, const string &stem, string &ptx, string &err) {
++    auto nvcc = NvccPath();
++    if (nvcc.empty()) {
++        err = "cuda fn needs nvcc: install the CUDA toolkit or set CUDA_PATH";
++        return false;
++    }
++    #ifdef _WIN32
++        // nvcc preprocesses with cl.
++        if (FindOnPath("cl").empty() && !ImportVcvars(false)) {
++            err = "nvcc needs Visual Studio's cl, which was not found";
++            return false;
++        }
++    #endif
++    // A fatbin: the GPU's own code, so loading it compiles nothing, and PTX
++    // for the GPUs after it.
++    auto cufile = stem + ".cu", ptxfile = stem + ".fatbin";
++    if (!WriteFileMakingDirs(cufile, cu)) {
++        err = cat("cannot write ", cufile);
++        return false;
++    }
++    auto arch = getenv("GOOSE_CUDA_ARCH");
++    vector<string> argv = { nvcc, "-fatbin", "-O3", cat("-arch=", arch && *arch ? arch : "native"),
++                            "-o", ptxfile, cufile };
++    // GOOSE_NVCC_FLAGS: more of nvcc's options, split at spaces.
++    if (auto extra = getenv("GOOSE_NVCC_FLAGS")) {
++        string w;
++        for (auto p = extra;; p++) {
++            if (*p && *p != ' ') { w += *p; continue; }
++            if (!w.empty()) argv.insert(argv.end() - 3, w);
++            w.clear();
++            if (!*p) break;
++        }
++    }
++    auto r = RunProcess(argv);
++    if (!r.started || r.code != 0 || !LoadFile(ptxfile, ptx)) {
++        err = cat("nvcc failed on ", cufile, ":\n", r.output);
++        return false;
++    }
++    return true;
++}
++
++}  // namespace goose
+diff --git a/src/dump.h b/src/dump.h
+index 23fcc32..8e2e443 100644
+--- a/src/dump.h
++++ b/src/dump.h
+@@ -663,6 +663,7 @@ inline void FnDecl::Dump(string &s, int ind) const {
+     if (sf->checkfree && !(sf->isnested && sf->outer && sf->outer->checkfree))
+         s += "checkfree ";
+     if (sf->issimd) s += "simd ";
++    if (sf->iscuda) s += "cuda ";
+     if (sf->isinline) s += "inline ";
+     if (sf->isrec) s += "recursive ";
+     s += sf->isthread ? "thread_fn " : "fn ";
+diff --git a/src/lsp_features.h b/src/lsp_features.h
+index ab0449a..bc588d7 100644
+--- a/src/lsp_features.h
++++ b/src/lsp_features.h
+@@ -73,6 +73,7 @@ inline string FnHeader(const SFunction *sf) {
+     if (sf->checkfree && !sf->isnested) s += "checkfree ";
+     if (sf->isinline) s += "inline ";
+     if (sf->issimd) s += "simd ";
++    if (sf->iscuda) s += "cuda ";
+     if (sf->isrec) s += "recursive ";
+     s += sf->isthread ? "thread_fn " : "fn ";
+     Append(s, sf->qname, GenericsText(sf->generics), "(");
+diff --git a/src/main.cpp b/src/main.cpp
+index fe80ca8..4f22463 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -45,6 +45,7 @@
+ #include "buildfile.h"
+ #include "json.h"
+ #include "toolchain.h"
++#include "cuda.h"
+ #include "builtin.h"
+ #include "build.h"
+ #include "packages.h"
+@@ -761,6 +762,8 @@ R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
+                         path (or GOOSE_CC; by default the first one found).
+   --standalone          Compile the runtime into the program rather than link
+                         the runtime object built once per C compiler.
++  --cuda-unchecked      cuda fn kernels index without bounds checks, as CUDA C
++                        does: an index out of range is undefined there.
+   -v                    Print each command the build runs and what it prints.
+   --dry-run             Print the commands the build would run, and run none.
+ )");
+@@ -1348,7 +1351,7 @@ int Main(int argc, char **argv) {
+     auto nobce = false, bcetest = false, bcelines = false, norfcheck = false;
+     auto stacks = false;
+     auto stats = false;
+-    auto forcejit = false, standalone = false;
++    auto forcejit = false, standalone = false, cudaunchecked = false;
+     auto json = false, refresh = false, debug = false, verbose = false, dryrun = false;
+     auto jsondiag = false;
+     string ccrequest;
+@@ -1398,6 +1401,7 @@ int Main(int argc, char **argv) {
+         else if (arg == "--unsafe-no-rf-check") norfcheck = true;
+         else if (arg == "--jit") forcejit = true;
+         else if (arg == "--standalone") standalone = true;
++        else if (arg == "--cuda-unchecked") cudaunchecked = true;
+         else if (arg == "--multi-test") multitest = true;
+         else if (arg == "--gen-runtime-header") {
+             try {
+@@ -1694,6 +1698,86 @@ int Main(int argc, char **argv) {
+         auto stackcfg = StackConfigOf(cdefines);
+         CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks);
+         if (stacks) cg.StackReport(msgs, stackcfg);
++        // cuda fn kernels: nvcc's PTX, which the program carries as text.
++        if (auto at = cg.head.find("@@GS_CUDA_PTX@@\n"); at != string::npos && !nocgen) {
++            string ptx;
++            if (!cg.cucode.empty()) {
++                auto &k = cg.cucode;
++                for (size_t i = 0; i < k.size();) {
++                    // A C compound literal, (T){...}, is T{...} to C++.
++                    if (k[i] == '(' && i + 1 < k.size() && (isalpha((unsigned char)k[i + 1]) || k[i + 1] == '_')) {
++                        auto j = i + 1;
++                        while (j < k.size() && (isalnum((unsigned char)k[j]) || k[j] == '_')) j++;
++                        if (j + 1 < k.size() && k[j] == ')' && k[j + 1] == '{') {
++                            k.erase(j, 1);
++                            k.erase(i, 1);
++                            continue;
++                        }
++                    }
++                    if (!(isalpha((unsigned char)k[i]) || k[i] == '_')) { i++; continue; }
++                    auto j = i;
++                    while (j < k.size() && (isalnum((unsigned char)k[j]) || k[j] == '_')) j++;
++                    auto id = string_view(k).substr(i, j - i);
++                    // gs_fileN go to the dropped location arguments; gs_rN are
++                    // a function's further results.
++                    auto local = id.substr(0, 7) == "gs_file" ||
++                                 (id.size() > 4 && id.substr(0, 4) == "gs_r" &&
++                                  id.find_first_not_of("0123456789", 4) == string_view::npos);
++                    if ((id.substr(0, 3) == "gs_" || id.substr(0, 3) == "GS_") && !local &&
++                        !CudaKnownName(id) && cg.cuprotos.find(cat(" ", id, "(")) == string::npos)
++                        throw CompileError { cat("a cuda fn uses ", id, ", which has no GPU form") };
++                    i = j;
++                }
++                // The program's own types the kernels name (fixed arrays, structs).
++                string types;
++                auto &h = cg.head;
++                for (size_t i = 0; (i = h.find("\ntypedef ", i)) != string::npos;) {
++                    size_t j = i + 1, depth = 0;
++                    for (; j < h.size(); j++) {
++                        if (h[j] == '{') depth++;
++                        else if (h[j] == '}') depth--;
++                        else if (h[j] == ';' && !depth) break;
++                    }
++                    auto e = j;
++                    while (e > i && !(isalnum((unsigned char)h[e - 1]) || h[e - 1] == '_')) e--;
++                    auto b = e;
++                    while (b > i && (isalnum((unsigned char)h[b - 1]) || h[b - 1] == '_')) b--;
++                    auto name = h.substr(b, e - b);
++                    auto word = [&](size_t p) { return p < k.size() && (isalnum((unsigned char)k[p]) || k[p] == '_'); };
++                    auto used = false;
++                    for (size_t p = 0; !name.empty() && !used && (p = k.find(name, p)) != string::npos; p++)
++                        used = (p == 0 || !word(p - 1)) && !word(p + name.size());
++                    if (used && name.compare(0, 3, "gs_") && name.compare(0, 3, "sl_") && !CudaKnownName(name))
++                        types += h.substr(i + 1, j - i) + "\n";
++                    i = j;
++                }
++                auto stem = outfile.empty()
++                    ? cat(GooseHome(), "/cuda/", Hex8(filename))
++                    : outfile.substr(0, outfile.find_last_of('.'));
++                string err;
++                // Unpacked: a kernel's values of these types stay on the device,
++                // and packing would have nvcc move an i32[4] a byte at a time
++                // through local memory instead of keeping it in registers.
++                if (!BuildCuda(cat("/* cuda fn kernels of ", filename, ", for nvcc. Generated by the "
++                                   "Goose compiler. */\n", cudaunchecked ? "#define GS_CUDA_UNCHECKED 1\n" : "",
++                                   cuda_prelude, types, cg.cuprotos, "\n", k),
++                               stem, ptx, err))
++                    throw CompileError { err };
++                if (stats) fprintf(msgs, "nvcc: %d bytes of fatbin\n", (int)ptx.size());
++            }
++            // Bytes: printable ones as they are, the rest in octal, which
++            // ends after three digits whatever follows.
++            string lit = "static const char gs_cuda_ptx[] =\n\"";
++            size_t col = 0;
++            for (auto ch : ptx) {
++                auto u = (unsigned char)ch;
++                if (u >= 32 && u < 127 && u != '\\' && u != '"' && u != '?') { lit += ch; col++; }
++                else { char e[8]; snprintf(e, sizeof e, "\\%03o", u); lit += e; col += 4; }
++                if (col >= 120) { lit += "\"\n\""; col = 0; }
++            }
++            lit += "\";\n";
++            cg.head.replace(at, 16, lit);
++        }
+         // The packages whose native parts the program needs, which a JIT
+         // run takes functions from and a build links: its own, when it has
+         // one, and every package an extern fn it calls was declared in,
+diff --git a/src/optimize.h b/src/optimize.h
+index b0f0190..0a489eb 100644
+--- a/src/optimize.h
++++ b/src/optimize.h
+@@ -244,7 +244,7 @@ struct Optimizer {
+         auto mainsf = ast.MainFunction();
+         if (mainsf && !mainsf->specs.empty()) Reach(mainsf->specs[0]);
+         for (auto sf : ast.functions)
+-            if ((sf->isthread || sf->isexport) && !sf->specs.empty()) Reach(sf->specs[0]);
++            if ((sf->isthread || sf->isexport || sf->iscuda) && !sf->specs.empty()) Reach(sf->specs[0]);
+         ast.ForEachRootTree([&](Node *n) { ReachTree(n); });
+     }
+ 
+@@ -501,7 +501,7 @@ struct Optimizer {
+         info.nest = 0;
+         info.nestedcalls = false;
+         // A simd body inlined into a caller would lose its versions (§7.12).
+-        auto noin = sp->sf->isrec || sp->incycle || sp->sf->isthread || sp->sf->isexport ||
++        auto noin = sp->sf->isrec || sp->incycle || sp->sf->isthread || sp->sf->isexport || sp->sf->iscuda ||
+                     sp->sf->issimd || sp->relnamedresult;
+         auto multiret = sp->rets.size() > 1;
+         function<void(Node *, int)> rec = [&](Node *n, int d) {
+diff --git a/src/parser.h b/src/parser.h
+index c5c1b8d..e34917e 100644
+--- a/src/parser.h
++++ b/src/parser.h
+@@ -143,7 +143,7 @@ struct Parser {
+             case T_DEFER: case T_RETURN: case T_BREAK: case T_CONTINUE:
+                 return !declaration;
+             default:
+-                return AtInline() || AtCheckfree();
++                return AtInline() || AtCheckfree() || AtCuda();
+         }
+     }
+ 
+@@ -304,6 +304,9 @@ struct Parser {
+                next == T_EXTERN || next == T_IDENT;
+     }
+ 
++    // `cuda` likewise, before `fn`.
++    bool AtCuda() { return lex.tok == T_IDENT && lex.attr == "cuda" && lex.PeekTok() == T_FN; }
++
+     void Expect(TType t, const char *context) {
+         if (lex.tok != t)
+             Error(cat("expected \'", TName(t), "\' in ", context, ", found \'", TokStr(), "\'"));
+@@ -455,7 +458,7 @@ struct Parser {
+             ParseStructDecl(true);
+             return;
+         }
+-        if (AtInline() || AtCheckfree()) goto fndecl;
++        if (AtInline() || AtCheckfree() || AtCuda()) goto fndecl;
+         switch (lex.tok) {
+             case T_STRUCT: ParseStructDecl(); return;
+             case T_ENUM:   ParseEnumDecl();   return;
+@@ -777,6 +780,13 @@ struct Parser {
+             if (sf->isextern) Error("extern fn cannot be simd: it has no body to compile");
+             sf->issimd = true;
+         }
++        if (AtCuda()) {
++            if (sf->isextern || sf->isexport || sf->issimd)
++                Error("cuda fn cannot be extern, export or simd");
++            if (nested) Error("cuda fn must be declared at top level");
++            sf->iscuda = true;
++            lex.Next();
++        }
+         if (AtInline()) {
+             if (sf->isextern) Error("extern fn cannot be inline: it has no body to copy");
+             if (sf->isexport) Error("export fn cannot be inline: its C wrapper calls it");
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 892ab96..c065cfa 100644
+index 892ab96..1cd50b4 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
 @@ -307,7 +307,7 @@ typedef float gs_vf32_16 __attribute__((vector_size(64), aligned(1), may_alias))
@@ -550,7 +1355,23 @@ index 892ab96..c065cfa 100644
  /* The generated code's memcpy and memset of zeros. Most move or clear the
     1 to 32 bytes of a field, an element or a reference, a constant size the
     optimizing backends turn into a few moves. TinyCC calls the C library for
-@@ -986,6 +1239,7 @@ GS_API void gs_free_msg(uint8_t *msg);
+@@ -959,6 +1212,15 @@ typedef struct gs_dlbind {
+ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
+                        int64_t nbinds);
+ 
++/* cuda fn kernels and device memory through the CUDA driver, runtime_os.h.
++   A launch loads ptx, the program's kernels, once, and caches the kernel
++   it names in *fn; args points at each parameter's value. */
++GS_API void gs_cuda_launch(void **fn, const char *name, const char *ptx, int64_t blocks,
++                           int64_t threads, void **args, const char *file, int line);
++GS_API uint64_t gs_cuda_alloc(int64_t bytes, const char *file, int line);
++GS_API void gs_cuda_htod(uint64_t dst, const void *src, int64_t bytes, const char *file, int line);
++GS_API void gs_cuda_dtoh(uint64_t src, void *dst, int64_t bytes, const char *file, int line);
++
+ /* ---------------------------------------------------------------------------
+    Threads and typed queues (§11.2), runtime_threads.h. */
+ 
+@@ -986,6 +1248,7 @@ GS_API void gs_free_msg(uint8_t *msg);
  typedef struct gs_qnode {
      struct gs_qnode *next;
      int64_t size;
@@ -558,7 +1379,7 @@ index 892ab96..c065cfa 100644
      /* Value bytes follow the header. */
  } gs_qnode;
  
-@@ -997,6 +1251,7 @@ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
+@@ -997,6 +1260,7 @@ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
  GS_API gs_qnode *gs_qget(gs_queue *q);
  GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms);
  GS_API gs_qnode *gs_qpoll(gs_queue *q);
@@ -567,7 +1388,7 @@ index 892ab96..c065cfa 100644
  /* Frees a queue and the messages left in it, once no thread program can
     use it (goose_exit); gs_qinit makes it again. */
 diff --git a/src/runtime/runtime_ext.h b/src/runtime/runtime_ext.h
-index 726cc54..248b5a7 100644
+index 726cc54..23e21c5 100644
 --- a/src/runtime/runtime_ext.h
 +++ b/src/runtime/runtime_ext.h
 @@ -108,6 +108,28 @@ static float gs_mul_addf(float x, float y, float z) {
@@ -599,7 +1420,7 @@ index 726cc54..248b5a7 100644
  /* math's other libm functions (stdlib/math.goose). C has them set errno on a
     domain or range error, so a C compiler takes each call for a write to
     memory: a loop around one loads again after it whatever it had hoisted
-@@ -232,6 +254,8 @@ GS_API void gs_os_arg(int64_t i, gs_rref out);
+@@ -232,9 +254,24 @@ GS_API void gs_os_arg(int64_t i, gs_rref out);
  GS_API uint8_t gs_os_getenv(sl_u8 name, gs_rref out);
  GS_API uint8_t gs_os_resource_dir(gs_rref out);
  GS_API int64_t gs_os_time_ns(void);
@@ -608,11 +1429,256 @@ index 726cc54..248b5a7 100644
  GS_API int64_t gs_os_clock_ns(void);
  GS_API void gs_os_sleep_ms(int64_t ms);
  GS_API uint64_t gs_os_random_u64(void);
++/* stdlib/cuda.goose: the first CUDA device (false for none), its name and
++   memory, freeing and waiting for the kernels launched so far. */
++GS_API uint8_t gs_cuda_init(void);
++GS_API uint8_t gs_cuda_name(gs_rref out);
++GS_API int64_t gs_cuda_memory(void);
++GS_API void gs_cuda_free(uint64_t p);
++GS_API void gs_cuda_sync(void);
++GS_API void gs_cuda_capture_begin(void);
++GS_API uint64_t gs_cuda_capture_end(void);
++GS_API void gs_cuda_graph_run(uint64_t g);
++GS_API void gs_cuda_fork(void);
++GS_API void gs_cuda_back(void);
++GS_API void gs_cuda_join(void);
+ /* os.trim_memory: discards unused complete pages of this thread program's
+    data stacks. Defined with the region registry it walks (runtime_impl.h),
+    but declared here like the other os primitives, so that no prototype is
 diff --git a/src/runtime/runtime_os.h b/src/runtime/runtime_os.h
-index 22c89e6..8737ccf 100644
+index 22c89e6..7627e22 100644
 --- a/src/runtime/runtime_os.h
 +++ b/src/runtime/runtime_os.h
-@@ -709,6 +709,28 @@ GS_API int64_t gs_os_clock_ns(void) {
+@@ -629,6 +629,228 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
+     }
+ }
+ 
++/* The CUDA driver, bound at first use, on the first device's primary
++   context, made current on each thread that reaches it. */
++static struct {
++    int state, dev;
++    void *ctx, *mod, *stream, *side, *cur;
++    int (*Init)(unsigned);
++    int (*FuncGetAttribute)(int *, int, void *);
++    int (*FuncSetAttribute)(void *, int, int);
++    int (*EventCreate)(void **, unsigned);
++    int (*EventRecord)(void *, void *);
++    int (*StreamWaitEvent)(void *, void *, unsigned);
++    int (*StreamCreate)(void **, unsigned);
++    int (*StreamSynchronize)(void *);
++    int (*StreamBeginCapture)(void *, int);
++    int (*StreamEndCapture)(void *, void **);
++    int (*GraphInstantiate)(void **, void *, unsigned long long);
++    int (*GraphLaunch)(void *, void *);
++    int (*GraphDestroy)(void *);
++    int (*DeviceGet)(int *, int);
++    int (*DeviceGetName)(char *, int, int);
++    int (*DeviceTotalMem)(size_t *, int);
++    int (*PrimaryCtxRetain)(void **, int);
++    int (*CtxSetCurrent)(void *);
++    int (*CtxSynchronize)(void);
++    int (*ModuleLoadDataEx)(void **, const void *, unsigned, int *, void **);
++    int (*ModuleGetFunction)(void **, void *, const char *);
++    int (*MemAlloc)(uint64_t *, size_t);
++    int (*MemFree)(uint64_t);
++    int (*MemcpyHtoD)(uint64_t, const void *, size_t);
++    int (*MemcpyDtoH)(void *, uint64_t, size_t);
++    int (*LaunchKernel)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
++                        unsigned, void *, void **, void **);
++    int (*GetErrorName)(int, const char **);
++} gs_cu;
++static GS_TLS int gs_cu_current;
++
++GS_API uint8_t gs_cuda_init(void) {
++    if (gs_cu.state) {
++        if (gs_cu.state > 0 && !gs_cu_current) gs_cu_current = !gs_cu.CtxSetCurrent(gs_cu.ctx);
++        return gs_cu.state > 0;
++    }
++    gs_cu.state = -1;
++#ifdef _WIN32
++    HMODULE h = LoadLibraryW(L"nvcuda.dll");
++#define GS_CU_SYM(f, s) (*(void **)&gs_cu.f = (void *)GetProcAddress(h, s))
++#else
++    void *h = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
++#define GS_CU_SYM(f, s) (*(void **)&gs_cu.f = dlsym(h, s))
++#endif
++    if (!h) return 0;
++    if (!GS_CU_SYM(Init, "cuInit") || !GS_CU_SYM(DeviceGet, "cuDeviceGet") ||
++        !GS_CU_SYM(DeviceGetName, "cuDeviceGetName") ||
++        !GS_CU_SYM(DeviceTotalMem, "cuDeviceTotalMem_v2") ||
++        !GS_CU_SYM(PrimaryCtxRetain, "cuDevicePrimaryCtxRetain") ||
++        !GS_CU_SYM(CtxSetCurrent, "cuCtxSetCurrent") ||
++        !GS_CU_SYM(CtxSynchronize, "cuCtxSynchronize") ||
++        !GS_CU_SYM(ModuleLoadDataEx, "cuModuleLoadDataEx") ||
++        !GS_CU_SYM(ModuleGetFunction, "cuModuleGetFunction") ||
++        !GS_CU_SYM(MemAlloc, "cuMemAlloc_v2") || !GS_CU_SYM(MemFree, "cuMemFree_v2") ||
++        !GS_CU_SYM(MemcpyHtoD, "cuMemcpyHtoD_v2") || !GS_CU_SYM(MemcpyDtoH, "cuMemcpyDtoH_v2") ||
++        !GS_CU_SYM(LaunchKernel, "cuLaunchKernel") || !GS_CU_SYM(GetErrorName, "cuGetErrorName") ||
++        !GS_CU_SYM(StreamCreate, "cuStreamCreate") ||
++        !GS_CU_SYM(StreamSynchronize, "cuStreamSynchronize") ||
++        !GS_CU_SYM(StreamBeginCapture, "cuStreamBeginCapture_v2") ||
++        !GS_CU_SYM(StreamEndCapture, "cuStreamEndCapture") ||
++        !GS_CU_SYM(GraphInstantiate, "cuGraphInstantiateWithFlags") ||
++        !GS_CU_SYM(GraphLaunch, "cuGraphLaunch") || !GS_CU_SYM(GraphDestroy, "cuGraphDestroy") ||
++        !GS_CU_SYM(EventCreate, "cuEventCreate") || !GS_CU_SYM(EventRecord, "cuEventRecord") ||
++        !GS_CU_SYM(StreamWaitEvent, "cuStreamWaitEvent") ||
++        !GS_CU_SYM(FuncGetAttribute, "cuFuncGetAttribute") ||
++        !GS_CU_SYM(FuncSetAttribute, "cuFuncSetAttribute"))
++        return 0;
++#undef GS_CU_SYM
++    /* Kernels go to a stream of their own, which a graph can capture; it
++       still orders with the copies, which take the legacy stream. */
++    if (gs_cu.Init(0) || gs_cu.DeviceGet(&gs_cu.dev, 0) ||
++        gs_cu.PrimaryCtxRetain(&gs_cu.ctx, gs_cu.dev) || gs_cu.CtxSetCurrent(gs_cu.ctx) ||
++        gs_cu.StreamCreate(&gs_cu.stream, 0) || gs_cu.StreamCreate(&gs_cu.side, 1))
++        return 0;
++    gs_cu.cur = gs_cu.stream;
++    gs_cu_current = 1;
++    gs_cu.state = 1;
++    return 1;
++}
++
++static void gs_cu_fail(int r, const char *what, const char *detail, const char *file, int line) {
++    const char *name = NULL;
++    if (gs_cu.state > 0) gs_cu.GetErrorName(r, &name);
++    char msg[8448];
++    int n = snprintf(msg, sizeof msg, "CUDA %s failed: %s (%d)%s%s", what, name ? name : "error", r,
++                     detail && *detail ? "\n" : "", detail ? detail : "");
++    if (!file) gs_panic(msg);
++    gs_abort_msg((const uint8_t *)msg, n < (int)sizeof msg ? n : (int)sizeof msg - 1, file, line);
++}
++
++static void gs_cu_ready(const char *file, int line) {
++    if (!gs_cuda_init()) {
++        static const char m[] = "no CUDA device (cuda.init() is false)";
++        if (!file) gs_panic(m);
++        gs_abort_msg((const uint8_t *)m, sizeof m - 1, file, line);
++    }
++    if (!gs_cu_current) gs_cu_fail(1, "context", NULL, file, line);
++}
++
++GS_API uint8_t gs_cuda_name(gs_rref out) {
++    char nm[256];
++    if (!gs_cuda_init() || gs_cu.DeviceGetName(nm, sizeof nm, gs_cu.dev)) return 0;
++    gs_bld_append(out, nm, (int64_t)strlen(nm));
++    return 1;
++}
++
++GS_API int64_t gs_cuda_memory(void) {
++    size_t n = 0;
++    return gs_cuda_init() && !gs_cu.DeviceTotalMem(&n, gs_cu.dev) ? (int64_t)n : 0;
++}
++
++GS_API uint64_t gs_cuda_alloc(int64_t bytes, const char *file, int line) {
++    gs_cu_ready(file, line);
++    uint64_t p = 0;
++    int r = gs_cu.MemAlloc(&p, (size_t)(bytes > 0 ? bytes : 1));
++    if (r) gs_cu_fail(r, "alloc", NULL, file, line);
++    return p;
++}
++
++GS_API void gs_cuda_free(uint64_t p) {
++    if (p && gs_cuda_init()) gs_cu.MemFree(p);
++}
++
++GS_API void gs_cuda_sync(void) {
++    if (!gs_cuda_init()) return;
++    int r = gs_cu.CtxSynchronize();
++    if (r) gs_cu_fail(r, "kernel", NULL, NULL, 0);
++}
++
++GS_API void gs_cuda_htod(uint64_t dst, const void *src, int64_t bytes, const char *file, int line) {
++    gs_cu_ready(file, line);
++    int r = bytes > 0 ? gs_cu.MemcpyHtoD(dst, src, (size_t)bytes) : 0;
++    if (r) gs_cu_fail(r, "copy to the device", NULL, file, line);
++}
++
++GS_API void gs_cuda_dtoh(uint64_t src, void *dst, int64_t bytes, const char *file, int line) {
++    gs_cu_ready(file, line);
++    int r = bytes > 0 ? gs_cu.MemcpyDtoH(dst, src, (size_t)bytes) : 0;
++    if (r) gs_cu_fail(r, "copy from the device", NULL, file, line);
++}
++
++GS_API void gs_cuda_launch(void **fn, const char *name, const char *ptx, int64_t blocks,
++                           int64_t threads, void **args, const char *file, int line) {
++    gs_cu_ready(file, line);
++    if (!*fn) {
++        if (!gs_cu.mod) {
++            static char log[8192];
++            int opts[2] = { 5, 6 };   /* CU_JIT_ERROR_LOG_BUFFER, its size */
++            void *vals[2] = { log, (void *)(uintptr_t)sizeof log };
++            int r = gs_cu.ModuleLoadDataEx(&gs_cu.mod, ptx, 2, opts, vals);
++            if (r) gs_cu_fail(r, "module load", log, file, line);
++        }
++        int r = gs_cu.ModuleGetFunction(fn, gs_cu.mod, name);
++        if (r) gs_cu_fail(r, "kernel lookup", name, file, line);
++        /* A kernel with much shared memory takes all the SM's that L1 can
++           give up, so that more of its blocks fit at once. */
++        int sh = 0;
++        if (gs_cu.FuncGetAttribute && !gs_cu.FuncGetAttribute(&sh, 1, *fn) && sh > 16384)
++            gs_cu.FuncSetAttribute(*fn, 9, 100);
++    }
++    if (blocks < 1 || blocks > 2147483647 || threads < 1 || threads > 1024) {
++        static const char m[] = "cuda_launch: blocks must be 1..2^31-1 and threads 1..1024";
++        gs_abort_msg((const uint8_t *)m, sizeof m - 1, file, line);
++    }
++    int r = gs_cu.LaunchKernel(*fn, (unsigned)blocks, 1, 1, (unsigned)threads, 1, 1, 0, gs_cu.cur,
++                               args, NULL);
++    if (r) gs_cu_fail(r, "launch", name, file, line);
++}
++
++/* The launches between capture_begin and capture_end, recorded rather than
++   run, as a graph graph_run replays with one call. */
++GS_API void gs_cuda_capture_begin(void) {
++    gs_cu_ready(NULL, 0);
++    int r = gs_cu.StreamBeginCapture(gs_cu.stream, 1);
++    if (r) gs_cu_fail(r, "capture", NULL, NULL, 0);
++}
++
++GS_API uint64_t gs_cuda_capture_end(void) {
++    void *g = NULL, *e = NULL;
++    int r = gs_cu.StreamEndCapture(gs_cu.stream, &g);
++    if (!r) r = gs_cu.GraphInstantiate(&e, g, 0);
++    if (r) gs_cu_fail(r, "capture", NULL, NULL, 0);
++    gs_cu.GraphDestroy(g);
++    return (uint64_t)(uintptr_t)e;
++}
++
++/* Launches between fork and join go to a second stream, which starts after
++   what was launched before fork and finishes before what comes after join:
++   in a graph, a branch beside the main line. */
++static void gs_cu_hop(void *from, void *to) {
++    void *e = NULL;
++    int r = gs_cu.EventCreate(&e, 2);   /* CU_EVENT_DISABLE_TIMING */
++    if (!r) r = gs_cu.EventRecord(e, from);
++    if (!r) r = gs_cu.StreamWaitEvent(to, e, 0);
++    if (r) gs_cu_fail(r, "stream fork", NULL, NULL, 0);
++}
++
++GS_API void gs_cuda_fork(void) {
++    gs_cu_ready(NULL, 0);
++    gs_cu_hop(gs_cu.stream, gs_cu.side);
++    gs_cu.cur = gs_cu.side;
++}
++
++GS_API void gs_cuda_back(void) { gs_cu.cur = gs_cu.stream; }
++
++GS_API void gs_cuda_join(void) {
++    gs_cu_ready(NULL, 0);
++    gs_cu_hop(gs_cu.side, gs_cu.stream);
++    gs_cu.cur = gs_cu.stream;
++}
++
++GS_API void gs_cuda_graph_run(uint64_t g) {
++    gs_cu_ready(NULL, 0);
++    int r = gs_cu.GraphLaunch((void *)(uintptr_t)g, gs_cu.stream);
++    if (r) gs_cu_fail(r, "graph launch", NULL, NULL, 0);
++}
++
+ GS_API void gs_os_arg(int64_t i, gs_rref out) {
+     if (i < 0 || i >= gs_argc) return;
+     const char *a = gs_argv[i];
+@@ -709,6 +931,28 @@ GS_API int64_t gs_os_clock_ns(void) {
  #endif
  }
  
@@ -775,7 +1841,7 @@ index d6a2bce..a910767 100644
          pthread_mutex_destroy(&s->mutex);
          pthread_cond_destroy(&s->cond);
 diff --git a/src/runtime_inline.h b/src/runtime_inline.h
-index 9e3b7a1..1c47531 100644
+index 9e3b7a1..fc21a4d 100644
 --- a/src/runtime_inline.h
 +++ b/src/runtime_inline.h
 @@ -343,7 +343,7 @@ typedef float gs_vf32_16 __attribute__((vector_size(64), aligned(1), may_alias))
@@ -1104,7 +2170,24 @@ index 9e3b7a1..1c47531 100644
  )GSRT"
  R"GSRT(/* The generated code's memcpy and memset of zeros. Most move or clear the
     1 to 32 bytes of a field, an element or a reference, a constant size the
-@@ -1074,6 +1329,7 @@ R"GSRT(/* One queue per flat element type the program uses (the compiler emits a
+@@ -1044,6 +1299,16 @@ typedef struct gs_dlbind {
+ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
+                        int64_t nbinds);
+ 
++)GSRT"
++R"GSRT(/* cuda fn kernels and device memory through the CUDA driver, runtime_os.h.
++   A launch loads ptx, the program's kernels, once, and caches the kernel
++   it names in *fn; args points at each parameter's value. */
++GS_API void gs_cuda_launch(void **fn, const char *name, const char *ptx, int64_t blocks,
++                           int64_t threads, void **args, const char *file, int line);
++GS_API uint64_t gs_cuda_alloc(int64_t bytes, const char *file, int line);
++GS_API void gs_cuda_htod(uint64_t dst, const void *src, int64_t bytes, const char *file, int line);
++GS_API void gs_cuda_dtoh(uint64_t src, void *dst, int64_t bytes, const char *file, int line);
++
+ )GSRT"
+ R"GSRT(/* ---------------------------------------------------------------------------
+    Threads and typed queues (§11.2), runtime_threads.h. */
+@@ -1074,6 +1339,7 @@ R"GSRT(/* One queue per flat element type the program uses (the compiler emits a
  typedef struct gs_qnode {
      struct gs_qnode *next;
      int64_t size;
@@ -1112,7 +2195,7 @@ index 9e3b7a1..1c47531 100644
      /* Value bytes follow the header. */
  } gs_qnode;
  
-@@ -1087,6 +1343,7 @@ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
+@@ -1087,6 +1353,7 @@ GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size);
  GS_API gs_qnode *gs_qget(gs_queue *q);
  GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms);
  GS_API gs_qnode *gs_qpoll(gs_queue *q);
@@ -1120,7 +2203,7 @@ index 9e3b7a1..1c47531 100644
  GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line);
  /* Frees a queue and the messages left in it, once no thread program can
     use it (goose_exit); gs_qinit makes it again. */
-@@ -3674,10 +3931,44 @@ R"GSRT(GS_API void gs_free_msg(uint8_t *msg) {
+@@ -3674,10 +3941,44 @@ R"GSRT(GS_API void gs_free_msg(uint8_t *msg) {
  R"GSRT(/* ---------------------------------------------------------------------------
     Typed queues (runtime.h). A queue holds at most `limit` messages. */
  
@@ -1165,7 +2248,7 @@ index 9e3b7a1..1c47531 100644
      gs_mutex mutex;
      gs_cond cond;
  };
-@@ -3721,6 +4012,8 @@ R"GSRT(GS_API void gs_qinit(gs_queue *q) {
+@@ -3721,6 +4022,8 @@ R"GSRT(GS_API void gs_qinit(gs_queue *q) {
      s->head = s->tail = NULL;
      s->count = 0;
      s->limit = INT64_MAX;
@@ -1174,7 +2257,7 @@ index 9e3b7a1..1c47531 100644
      gs_mutex_init(&s->mutex);
      #if defined(_WIN32) || defined(__APPLE__)
          gs_cond_init(&s->cond);
-@@ -3740,8 +4033,21 @@ R"GSRT(/* Allocates and copies before it takes the lock, so the lock is held onl
+@@ -3740,8 +4043,21 @@ R"GSRT(/* Allocates and copies before it takes the lock, so the lock is held onl
     to check the limit and link the node. */
  GS_API uint8_t gs_qput(gs_queue *q, const void *data, int64_t size) {
      struct gs_qstate *s = *q;
@@ -1198,7 +2281,7 @@ index 9e3b7a1..1c47531 100644
      n->next = NULL;
      n->size = size;
      memcpy(n + 1, data, (size_t)size);
-@@ -3772,6 +4078,7 @@ static gs_qnode *gs_qtake(struct gs_qstate *s) {
+@@ -3772,6 +4088,7 @@ static gs_qnode *gs_qtake(struct gs_qstate *s) {
  )GSRT"
  R"GSRT(GS_API gs_qnode *gs_qget(gs_queue *q) {
      struct gs_qstate *s = *q;
@@ -1206,7 +2289,7 @@ index 9e3b7a1..1c47531 100644
      gs_mutex_lock(&s->mutex);
      while (!s->head) gs_cond_wait(&s->cond, &s->mutex);
      gs_qnode *n = gs_qtake(s);
-@@ -3782,6 +4089,9 @@ R"GSRT(GS_API gs_qnode *gs_qget(gs_queue *q) {
+@@ -3782,6 +4099,9 @@ R"GSRT(GS_API gs_qnode *gs_qget(gs_queue *q) {
  )GSRT"
  R"GSRT(GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
      struct gs_qstate *s = *q;
@@ -1216,7 +2299,7 @@ index 9e3b7a1..1c47531 100644
      /* Caps ms so the deadline in nanoseconds can't overflow. */
      if (ms > INT64_MAX / 2000000) ms = INT64_MAX / 2000000;
      int64_t deadline = ms > 0 ? gs_qclock_ns() + ms * 1000000 : 0;
-@@ -3796,6 +4106,23 @@ R"GSRT(GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
+@@ -3796,6 +4116,23 @@ R"GSRT(GS_API gs_qnode *gs_qwait(gs_queue *q, int64_t ms) {
  )GSRT"
  R"GSRT(GS_API gs_qnode *gs_qpoll(gs_queue *q) { return gs_qwait(q, 0); }
  
@@ -1240,7 +2323,7 @@ index 9e3b7a1..1c47531 100644
  )GSRT"
  R"GSRT(GS_API void gs_qlimit(gs_queue *q, int64_t n, const char *file, int line) {
      if (n <= 0) gs_abort(GS_E_QBOUND, file, line);
-@@ -3811,6 +4138,11 @@ GS_API void gs_qfree(gs_queue *q) {
+@@ -3811,6 +4148,11 @@ GS_API void gs_qfree(gs_queue *q) {
      struct gs_qstate *s = *q;
      if (!s) return;
      while (s->head) free(gs_qtake(s));
@@ -1252,7 +2335,7 @@ index 9e3b7a1..1c47531 100644
      #ifndef _WIN32
          pthread_mutex_destroy(&s->mutex);
          pthread_cond_destroy(&s->cond);
-@@ -3965,6 +4297,29 @@ static float gs_mul_addf(float x, float y, float z) {
+@@ -3965,6 +4307,29 @@ static float gs_mul_addf(float x, float y, float z) {
  #define gs_mul_add(x, y, z) GS_MUL_ADD_CAT(gs_mul_add_, GS_MUL_ADD_MODE)(x, y, z)
  #define gs_mul_addf(x, y, z) GS_MUL_ADD_CAT(gs_mul_addf_, GS_MUL_ADD_MODE)(x, y, z)
  
@@ -1282,7 +2365,7 @@ index 9e3b7a1..1c47531 100644
  )GSRT"
  R"GSRT(/* math's other libm functions (stdlib/math.goose). C has them set errno on a
     domain or range error, so a C compiler takes each call for a write to
-@@ -4093,6 +4448,8 @@ GS_API void gs_os_arg(int64_t i, gs_rref out);
+@@ -4093,9 +4458,24 @@ GS_API void gs_os_arg(int64_t i, gs_rref out);
  GS_API uint8_t gs_os_getenv(sl_u8 name, gs_rref out);
  GS_API uint8_t gs_os_resource_dir(gs_rref out);
  GS_API int64_t gs_os_time_ns(void);
@@ -1291,7 +2374,271 @@ index 9e3b7a1..1c47531 100644
  GS_API int64_t gs_os_clock_ns(void);
  GS_API void gs_os_sleep_ms(int64_t ms);
  GS_API uint64_t gs_os_random_u64(void);
-@@ -4868,6 +5225,29 @@ GS_API int64_t gs_os_clock_ns(void) {
++/* stdlib/cuda.goose: the first CUDA device (false for none), its name and
++   memory, freeing and waiting for the kernels launched so far. */
++GS_API uint8_t gs_cuda_init(void);
++GS_API uint8_t gs_cuda_name(gs_rref out);
++GS_API int64_t gs_cuda_memory(void);
++GS_API void gs_cuda_free(uint64_t p);
++GS_API void gs_cuda_sync(void);
++GS_API void gs_cuda_capture_begin(void);
++GS_API uint64_t gs_cuda_capture_end(void);
++GS_API void gs_cuda_graph_run(uint64_t g);
++GS_API void gs_cuda_fork(void);
++GS_API void gs_cuda_back(void);
++GS_API void gs_cuda_join(void);
+ /* os.trim_memory: discards unused complete pages of this thread program's
+    data stacks. Defined with the region registry it walks (runtime_impl.h),
+    but declared here like the other os primitives, so that no prototype is
+@@ -4784,6 +5164,247 @@ R"GSRT(GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbi
+     }
+ }
+ 
++)GSRT"
++R"GSRT(/* The CUDA driver, bound at first use, on the first device's primary
++   context, made current on each thread that reaches it. */
++static struct {
++    int state, dev;
++    void *ctx, *mod, *stream, *side, *cur;
++    int (*Init)(unsigned);
++    int (*FuncGetAttribute)(int *, int, void *);
++    int (*FuncSetAttribute)(void *, int, int);
++    int (*EventCreate)(void **, unsigned);
++    int (*EventRecord)(void *, void *);
++    int (*StreamWaitEvent)(void *, void *, unsigned);
++    int (*StreamCreate)(void **, unsigned);
++    int (*StreamSynchronize)(void *);
++    int (*StreamBeginCapture)(void *, int);
++    int (*StreamEndCapture)(void *, void **);
++    int (*GraphInstantiate)(void **, void *, unsigned long long);
++    int (*GraphLaunch)(void *, void *);
++    int (*GraphDestroy)(void *);
++    int (*DeviceGet)(int *, int);
++    int (*DeviceGetName)(char *, int, int);
++    int (*DeviceTotalMem)(size_t *, int);
++    int (*PrimaryCtxRetain)(void **, int);
++    int (*CtxSetCurrent)(void *);
++    int (*CtxSynchronize)(void);
++    int (*ModuleLoadDataEx)(void **, const void *, unsigned, int *, void **);
++    int (*ModuleGetFunction)(void **, void *, const char *);
++    int (*MemAlloc)(uint64_t *, size_t);
++    int (*MemFree)(uint64_t);
++    int (*MemcpyHtoD)(uint64_t, const void *, size_t);
++    int (*MemcpyDtoH)(void *, uint64_t, size_t);
++    int (*LaunchKernel)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
++                        unsigned, void *, void **, void **);
++    int (*GetErrorName)(int, const char **);
++} gs_cu;
++static GS_TLS int gs_cu_current;
++
++)GSRT"
++R"GSRT(GS_API uint8_t gs_cuda_init(void) {
++    if (gs_cu.state) {
++        if (gs_cu.state > 0 && !gs_cu_current) gs_cu_current = !gs_cu.CtxSetCurrent(gs_cu.ctx);
++        return gs_cu.state > 0;
++    }
++    gs_cu.state = -1;
++#ifdef _WIN32
++    HMODULE h = LoadLibraryW(L"nvcuda.dll");
++#define GS_CU_SYM(f, s) (*(void **)&gs_cu.f = (void *)GetProcAddress(h, s))
++#else
++    void *h = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
++#define GS_CU_SYM(f, s) (*(void **)&gs_cu.f = dlsym(h, s))
++#endif
++    if (!h) return 0;
++    if (!GS_CU_SYM(Init, "cuInit") || !GS_CU_SYM(DeviceGet, "cuDeviceGet") ||
++        !GS_CU_SYM(DeviceGetName, "cuDeviceGetName") ||
++        !GS_CU_SYM(DeviceTotalMem, "cuDeviceTotalMem_v2") ||
++        !GS_CU_SYM(PrimaryCtxRetain, "cuDevicePrimaryCtxRetain") ||
++        !GS_CU_SYM(CtxSetCurrent, "cuCtxSetCurrent") ||
++        !GS_CU_SYM(CtxSynchronize, "cuCtxSynchronize") ||
++        !GS_CU_SYM(ModuleLoadDataEx, "cuModuleLoadDataEx") ||
++        !GS_CU_SYM(ModuleGetFunction, "cuModuleGetFunction") ||
++        !GS_CU_SYM(MemAlloc, "cuMemAlloc_v2") || !GS_CU_SYM(MemFree, "cuMemFree_v2") ||
++        !GS_CU_SYM(MemcpyHtoD, "cuMemcpyHtoD_v2") || !GS_CU_SYM(MemcpyDtoH, "cuMemcpyDtoH_v2") ||
++        !GS_CU_SYM(LaunchKernel, "cuLaunchKernel") || !GS_CU_SYM(GetErrorName, "cuGetErrorName") ||
++        !GS_CU_SYM(StreamCreate, "cuStreamCreate") ||
++        !GS_CU_SYM(StreamSynchronize, "cuStreamSynchronize") ||
++        !GS_CU_SYM(StreamBeginCapture, "cuStreamBeginCapture_v2") ||
++        !GS_CU_SYM(StreamEndCapture, "cuStreamEndCapture") ||
++        !GS_CU_SYM(GraphInstantiate, "cuGraphInstantiateWithFlags") ||
++        !GS_CU_SYM(GraphLaunch, "cuGraphLaunch") || !GS_CU_SYM(GraphDestroy, "cuGraphDestroy") ||
++        !GS_CU_SYM(EventCreate, "cuEventCreate") || !GS_CU_SYM(EventRecord, "cuEventRecord") ||
++        !GS_CU_SYM(StreamWaitEvent, "cuStreamWaitEvent") ||
++        !GS_CU_SYM(FuncGetAttribute, "cuFuncGetAttribute") ||
++        !GS_CU_SYM(FuncSetAttribute, "cuFuncSetAttribute"))
++        return 0;
++#undef GS_CU_SYM
++    /* Kernels go to a stream of their own, which a graph can capture; it
++       still orders with the copies, which take the legacy stream. */
++    if (gs_cu.Init(0) || gs_cu.DeviceGet(&gs_cu.dev, 0) ||
++        gs_cu.PrimaryCtxRetain(&gs_cu.ctx, gs_cu.dev) || gs_cu.CtxSetCurrent(gs_cu.ctx) ||
++        gs_cu.StreamCreate(&gs_cu.stream, 0) || gs_cu.StreamCreate(&gs_cu.side, 1))
++        return 0;
++    gs_cu.cur = gs_cu.stream;
++    gs_cu_current = 1;
++    gs_cu.state = 1;
++    return 1;
++}
++
++)GSRT"
++R"GSRT(static void gs_cu_fail(int r, const char *what, const char *detail, const char *file, int line) {
++    const char *name = NULL;
++    if (gs_cu.state > 0) gs_cu.GetErrorName(r, &name);
++    char msg[8448];
++    int n = snprintf(msg, sizeof msg, "CUDA %s failed: %s (%d)%s%s", what, name ? name : "error", r,
++                     detail && *detail ? "\n" : "", detail ? detail : "");
++    if (!file) gs_panic(msg);
++    gs_abort_msg((const uint8_t *)msg, n < (int)sizeof msg ? n : (int)sizeof msg - 1, file, line);
++}
++
++)GSRT"
++R"GSRT(static void gs_cu_ready(const char *file, int line) {
++    if (!gs_cuda_init()) {
++        static const char m[] = "no CUDA device (cuda.init() is false)";
++        if (!file) gs_panic(m);
++        gs_abort_msg((const uint8_t *)m, sizeof m - 1, file, line);
++    }
++    if (!gs_cu_current) gs_cu_fail(1, "context", NULL, file, line);
++}
++
++)GSRT"
++R"GSRT(GS_API uint8_t gs_cuda_name(gs_rref out) {
++    char nm[256];
++    if (!gs_cuda_init() || gs_cu.DeviceGetName(nm, sizeof nm, gs_cu.dev)) return 0;
++    gs_bld_append(out, nm, (int64_t)strlen(nm));
++    return 1;
++}
++
++)GSRT"
++R"GSRT(GS_API int64_t gs_cuda_memory(void) {
++    size_t n = 0;
++    return gs_cuda_init() && !gs_cu.DeviceTotalMem(&n, gs_cu.dev) ? (int64_t)n : 0;
++}
++
++)GSRT"
++R"GSRT(GS_API uint64_t gs_cuda_alloc(int64_t bytes, const char *file, int line) {
++    gs_cu_ready(file, line);
++    uint64_t p = 0;
++    int r = gs_cu.MemAlloc(&p, (size_t)(bytes > 0 ? bytes : 1));
++    if (r) gs_cu_fail(r, "alloc", NULL, file, line);
++    return p;
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_free(uint64_t p) {
++    if (p && gs_cuda_init()) gs_cu.MemFree(p);
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_sync(void) {
++    if (!gs_cuda_init()) return;
++    int r = gs_cu.CtxSynchronize();
++    if (r) gs_cu_fail(r, "kernel", NULL, NULL, 0);
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_htod(uint64_t dst, const void *src, int64_t bytes, const char *file, int line) {
++    gs_cu_ready(file, line);
++    int r = bytes > 0 ? gs_cu.MemcpyHtoD(dst, src, (size_t)bytes) : 0;
++    if (r) gs_cu_fail(r, "copy to the device", NULL, file, line);
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_dtoh(uint64_t src, void *dst, int64_t bytes, const char *file, int line) {
++    gs_cu_ready(file, line);
++    int r = bytes > 0 ? gs_cu.MemcpyDtoH(dst, src, (size_t)bytes) : 0;
++    if (r) gs_cu_fail(r, "copy from the device", NULL, file, line);
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_launch(void **fn, const char *name, const char *ptx, int64_t blocks,
++                           int64_t threads, void **args, const char *file, int line) {
++    gs_cu_ready(file, line);
++    if (!*fn) {
++        if (!gs_cu.mod) {
++            static char log[8192];
++            int opts[2] = { 5, 6 };   /* CU_JIT_ERROR_LOG_BUFFER, its size */
++            void *vals[2] = { log, (void *)(uintptr_t)sizeof log };
++            int r = gs_cu.ModuleLoadDataEx(&gs_cu.mod, ptx, 2, opts, vals);
++            if (r) gs_cu_fail(r, "module load", log, file, line);
++        }
++        int r = gs_cu.ModuleGetFunction(fn, gs_cu.mod, name);
++        if (r) gs_cu_fail(r, "kernel lookup", name, file, line);
++        /* A kernel with much shared memory takes all the SM's that L1 can
++           give up, so that more of its blocks fit at once. */
++        int sh = 0;
++        if (gs_cu.FuncGetAttribute && !gs_cu.FuncGetAttribute(&sh, 1, *fn) && sh > 16384)
++            gs_cu.FuncSetAttribute(*fn, 9, 100);
++    }
++    if (blocks < 1 || blocks > 2147483647 || threads < 1 || threads > 1024) {
++        static const char m[] = "cuda_launch: blocks must be 1..2^31-1 and threads 1..1024";
++        gs_abort_msg((const uint8_t *)m, sizeof m - 1, file, line);
++    }
++    int r = gs_cu.LaunchKernel(*fn, (unsigned)blocks, 1, 1, (unsigned)threads, 1, 1, 0, gs_cu.cur,
++                               args, NULL);
++    if (r) gs_cu_fail(r, "launch", name, file, line);
++}
++
++)GSRT"
++R"GSRT(/* The launches between capture_begin and capture_end, recorded rather than
++   run, as a graph graph_run replays with one call. */
++GS_API void gs_cuda_capture_begin(void) {
++    gs_cu_ready(NULL, 0);
++    int r = gs_cu.StreamBeginCapture(gs_cu.stream, 1);
++    if (r) gs_cu_fail(r, "capture", NULL, NULL, 0);
++}
++
++)GSRT"
++R"GSRT(GS_API uint64_t gs_cuda_capture_end(void) {
++    void *g = NULL, *e = NULL;
++    int r = gs_cu.StreamEndCapture(gs_cu.stream, &g);
++    if (!r) r = gs_cu.GraphInstantiate(&e, g, 0);
++    if (r) gs_cu_fail(r, "capture", NULL, NULL, 0);
++    gs_cu.GraphDestroy(g);
++    return (uint64_t)(uintptr_t)e;
++}
++
++)GSRT"
++R"GSRT(/* Launches between fork and join go to a second stream, which starts after
++   what was launched before fork and finishes before what comes after join:
++   in a graph, a branch beside the main line. */
++static void gs_cu_hop(void *from, void *to) {
++    void *e = NULL;
++    int r = gs_cu.EventCreate(&e, 2);   /* CU_EVENT_DISABLE_TIMING */
++    if (!r) r = gs_cu.EventRecord(e, from);
++    if (!r) r = gs_cu.StreamWaitEvent(to, e, 0);
++    if (r) gs_cu_fail(r, "stream fork", NULL, NULL, 0);
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_fork(void) {
++    gs_cu_ready(NULL, 0);
++    gs_cu_hop(gs_cu.stream, gs_cu.side);
++    gs_cu.cur = gs_cu.side;
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_back(void) { gs_cu.cur = gs_cu.stream; }
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_join(void) {
++    gs_cu_ready(NULL, 0);
++    gs_cu_hop(gs_cu.side, gs_cu.stream);
++    gs_cu.cur = gs_cu.stream;
++}
++
++)GSRT"
++R"GSRT(GS_API void gs_cuda_graph_run(uint64_t g) {
++    gs_cu_ready(NULL, 0);
++    int r = gs_cu.GraphLaunch((void *)(uintptr_t)g, gs_cu.stream);
++    if (r) gs_cu_fail(r, "graph launch", NULL, NULL, 0);
++}
++
+ )GSRT"
+ R"GSRT(GS_API void gs_os_arg(int64_t i, gs_rref out) {
+     if (i < 0 || i >= gs_argc) return;
+@@ -4868,6 +5489,29 @@ GS_API int64_t gs_os_clock_ns(void) {
  #endif
  }
  
@@ -1321,14 +2668,265 @@ index 9e3b7a1..1c47531 100644
  )GSRT"
  R"GSRT(GS_API void gs_os_sleep_ms(int64_t ms) {
      if (ms <= 0) return;
+diff --git a/src/typecheck.h b/src/typecheck.h
+index 4fe5b8d..8644acc 100644
+--- a/src/typecheck.h
++++ b/src/typecheck.h
+@@ -2397,6 +2397,11 @@ struct TypeCheck {
+     void ReturnThroughCalls(Val &v, int tf, Return *r);
+     void CheckReturn(Return *r);
+     FnSpec *EnsureThreadSpec(SFunction *sf, Line l);
++    FnSpec *EnsureCudaSpec(SFunction *sf, Line l);
++    bool InCuda() {
++        for (auto &f : frames) if (f.sf && f.sf->iscuda) return true;
++        return false;
++    }
+ 
+     // ------------------------------------------------------------------
+     // Struct and variant literals (§4.2). The per-node entry is
+@@ -3095,6 +3100,7 @@ struct TypeCheck {
+         for (size_t i = 0; i < ast.functions.size(); i++) {
+             auto sf = ast.functions[i];
+             if (sf->isthread) CheckRoot([&] { EnsureThreadSpec(sf, sf->line); });
++            if (sf->iscuda) CheckRoot([&] { EnsureCudaSpec(sf, sf->line); });
+         }
+         // Thread programs may not touch globals: that would be shared mutable
+         // memory between programs (§11.2).
 diff --git a/src/typecheck_builtins.h b/src/typecheck_builtins.h
-index 21a62e2..a497dcb 100644
+index 21a62e2..fdd6cdf 100644
 --- a/src/typecheck_builtins.h
 +++ b/src/typecheck_builtins.h
-@@ -166,6 +166,102 @@ inline Val TypeCheck::CheckBuiltin(Call *c, const BuiltinDef &d, vector<Node *>
+@@ -166,6 +166,329 @@ inline Val TypeCheck::CheckBuiltin(Call *c, const BuiltinDef &d, vector<Node *>
              v.writable = false;
              return v;
          }
++        case B_CUDA_LAUNCH: {
++            // cuda_launch(k, blocks, threads, args...): a cuda fn's grid; a
++            // slice parameter takes a cuda::buf of its element type.
++            if (InCuda()) Error(c, "cuda_launch starts a kernel from the host, not from a cuda fn");
++            auto kid = Is<Ident>(args[0]);
++            SFunction *ksf = nullptr;
++            if (kid)
++                for (auto sf : ast.LookupFunctions(kid->name, kid->ns))
++                    if (sf->iscuda) {
++                        if (ksf) Error(c, cat("ambiguous cuda_launch of ", kid->name));
++                        ksf = sf;
++                    }
++            if (!ksf) Error(c, "cuda_launch's first argument names a cuda fn");
++            kid->fnref = ksf;
++            kid->exprtype = fntype;
++            auto spec = EnsureCudaSpec(ksf, c->line);
++            if (args.size() != 3 + spec->argtypes.size())
++                Error(c, cat("cuda_launch(", ksf->name, ", blocks, threads, ...) takes ",
++                             (int64_t)spec->argtypes.size(), " kernel argument(s)"));
++            CheckIntAny(args[1]);
++            CheckIntAny(args[2]);
++            for (size_t i = 0; i < spec->argtypes.size(); i++) {
++                auto pt = spec->argtypes[i];
++                if (pt->kind != TY_SLICE) {
++                    CheckArg(args[3 + i], pt);
++                    continue;
++                }
++                auto bv = DecayRef(CheckValue(args[3 + i], nullptr));
++                args[3 + i]->exprtype = bv.type;
++                auto bt = bv.type;
++                if (bt->kind != TY_STRUCT || bt->struc->st->qname != "cuda::buf" ||
++                    bt->struc->args.size() != 1 || bt->struc->args[0]->kind != pt->sub->kind ||
++                    !TypeEq(bt->struc->args[0], pt->sub))
++                    Error(args[3 + i], cat("kernel parameter ", ksf->params[i].name, " takes a cuda::buf<",
++                                           TypeStr(pt->sub), ">, not ", TypeStr(bt)));
++            }
++            c->spec = spec;
++            return VoidVal();
++        }
++        case B_CUDA_ALLOC: {
++            // cuda_alloc<T>(n): the device address of room for n Ts.
++            if (InCuda()) Error(c, "cuda_alloc runs on the host");
++            if (c->tyargs.size() != 1) Error(c, "cuda_alloc<T>(n) needs exactly one explicit type argument");
++            auto t = Subst(c->tyargs[0]);
++            ValidateType(t, c->line, VT_LOCAL);
++            if (ClassOf(t) != SC_FIXED) Error(c, cat("cuda_alloc takes a fixed-size type, not ", TypeStr(t)));
++            CheckArg(args[0], ast.inttypes[IS_I64]);
++            c->qtype = t;
++            Val v;
++            v.type = ast.inttypes[IS_U64];
++            return v;
++        }
++        case B_CUDA_COPY_IN: case B_CUDA_COPY_OUT: {
++            // cuda_copy_in(p, s): s's elements to device address p;
++            // cuda_copy_out(s, p): back.
++            if (InCuda()) Error(c, cat(d.name, " runs on the host"));
++            auto si = d.kind == B_CUDA_COPY_IN ? 1 : 0;
++            CheckArg(args[1 - si], ast.inttypes[IS_U64]);
++            auto sv = DecayRef(CheckV(args[si], nullptr));
++            args[si]->exprtype = sv.type;
++            if (sv.type->kind != TY_SLICE || ClassOf(sv.type->sub) != SC_FIXED)
++                Error(c, cat(d.name, " takes a slice of fixed-size elements, not ", TypeStr(sv.type)));
++            if (si == 0 && sv.type->cq) Error(c, "cuda_copy_out writes its slice: it cannot be const");
++            return VoidVal();
++        }
++        case B_CUDA_SHARED: {
++            // cuda_shared<T>(n): n Ts every thread of the block shares, n a
++            // literal.
++            if (!InCuda()) Error(c, "cuda_shared runs on the GPU: call it in a cuda fn");
++            if (c->tyargs.size() != 1) Error(c, "cuda_shared<T>(n) needs exactly one explicit type argument");
++            auto t = Subst(c->tyargs[0]);
++            if (!(IsIntT(t) || t->kind == TY_FLT) || t->ix)
++                Error(c, cat("cuda_shared holds scalars, not ", TypeStr(t)));
++            auto n = Is<IntLit>(args[0]);
++            if (!n || n->val < 1) Error(c, "cuda_shared<T>(n) takes a positive integer literal");
++            CheckArg(args[0], ast.inttypes[IS_I64]);
++            c->qtype = t;
++            auto st = ast.SliceOf(t, c->line);
++            c->rettypes.push_back(st);
++            Val v;
++            v.type = st;
++            v.Set(nullptr, true);
++            v.writable = true;
++            return v;
++        }
++        case B_CUDA_THREAD: case B_CUDA_BLOCK: case B_CUDA_BLOCK_DIM: case B_CUDA_GRID_DIM:
++        case B_CUDA_SYNC: case B_CUDA_SHFL_XOR: case B_CUDA_DP4A: case B_CUDA_H2F: case B_CUDA_F2H:
++        case B_CUDA_ATOMIC_ADD: case B_CUDA_FENCE: case B_CUDA_MMA: case B_CUDA_MMA16: case B_CUDA_MMAH: case B_CUDA_F2H2: case B_CUDA_LD4: case B_CUDA_LDSM4:
++        case B_CUDA_CP_ASYNC: case B_CUDA_CP_ASYNC4: case B_CUDA_CP_COMMIT: case B_CUDA_CP_WAIT: {
++            if (!InCuda()) Error(c, cat(d.name, " runs on the GPU: call it in a cuda fn"));
++            if (d.kind == B_CUDA_SYNC || d.kind == B_CUDA_FENCE || d.kind == B_CUDA_CP_COMMIT) return VoidVal();
++            if (d.kind == B_CUDA_CP_WAIT) {
++                // cuda_cp_wait(n): until at most n of this thread's committed
++                // groups of copies are still in flight; n a literal.
++                auto n = Is<IntLit>(args[0]);
++                if (!n || n->val < 0 || n->val > 7) Error(c, "cuda_cp_wait(n) takes a literal 0..7");
++                CheckArg(args[0], ast.inttypes[IS_I64]);
++                return VoidVal();
++            }
++            if (d.kind == B_CUDA_CP_ASYNC || d.kind == B_CUDA_CP_ASYNC4) {
++                // cuda_cp_async(d, i, s, j): 16 bytes from s[j..] to the shared
++                // d[i..], not waited for (cuda_cp_commit, cuda_cp_wait);
++                // cuda_cp_async4 the one 4-byte element.
++                auto dv = DecayRef(CheckV(args[0], nullptr));
++                args[0]->exprtype = dv.type;
++                CheckIntAny(args[1]);
++                auto sv = DecayRef(CheckV(args[2], nullptr));
++                args[2]->exprtype = sv.type;
++                CheckIntAny(args[3]);
++                auto okt = [&](TypeExpr *t) {
++                    return t->kind == TY_SLICE && (IsIntT(t->sub) || t->sub->kind == TY_FLT) && !t->sub->ix;
++                };
++                if (!okt(dv.type) || !okt(sv.type) || dv.type->cq || !TypeEq(dv.type->sub, sv.type->sub))
++                    Error(c, cat("cuda_cp_async takes a writable and a readable slice of one scalar type, not ",
++                                 TypeStr(dv.type), " and ", TypeStr(sv.type)));
++                return VoidVal();
++            }
++            Val v;
++            if (d.kind == B_CUDA_MMA || d.kind == B_CUDA_MMA16) {
++                // cuda_mma(a, b, c): the warp's 16x8 i32 tile c plus a 16x32
++                // i8 tile times a 32x8 one (mma.m16n8k32), each lane holding
++                // its fragments: a i32[4], b i32[2], c i32[4]. cuda_mma16:
++                // k 16, a i32[2], b an i32.
++                auto k16 = d.kind == B_CUDA_MMA16;
++                auto arr = [&](int n) { return ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, n); };
++                CheckArg(args[0], arr(k16 ? 2 : 4));
++                CheckArg(args[1], k16 ? ast.inttypes[IS_I32] : arr(2));
++                CheckArg(args[2], arr(4));
++                auto rt = arr(4);
++                c->rettypes.push_back(rt);
++                v.type = rt;
++                return v;
++            }
++            if (d.kind == B_CUDA_MMAH) {
++                // cuda_mmah(a, b, c): c plus a 16x16 f16 tile times a 16x8 one
++                // (mma.m16n8k16, f32 accumulator), each lane holding its
++                // fragments: a i32[4] and b i32[2] of half pairs, c f32[4].
++                auto arr = [&](int n) { return ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, n); };
++                CheckArg(args[0], arr(4));
++                CheckArg(args[1], arr(2));
++                auto ft = ast.ArrayOf(ast.flttypes[FS_F32], A_FIXED, c->line, 4);
++                CheckArg(args[2], ft);
++                c->rettypes.push_back(ft);
++                v.type = ft;
++                return v;
++            }
++            if (d.kind == B_CUDA_LDSM4) {
++                // cuda_ldsm4(s, i): ldmatrix.x4 from the shared i32 slice s, the
++                // lane's row of 16 bytes at s[i..]: lane l / 8's matrix, row l % 8;
++                // each lane gets its fragment word of the four 8x8 b16 matrices.
++                auto sv = DecayRef(CheckV(args[0], nullptr));
++                args[0]->exprtype = sv.type;
++                if (sv.type->kind != TY_SLICE || !IsIntT(sv.type->sub) || sv.type->sub->intstorage != IS_I32)
++                    Error(c, cat("cuda_ldsm4 takes a shared i32 slice, not ", TypeStr(sv.type)));
++                CheckIntAny(args[1]);
++                auto rt = ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, 4);
++                c->rettypes.push_back(rt);
++                v.type = rt;
++                return v;
++            }
++            if (d.kind == B_CUDA_LD4) {
++                // cuda_ld4(s, i): s[i..i + 4] as one 16-byte read-only load, i a
++                // multiple of 4 of an i32 slice.
++                auto sv = DecayRef(CheckV(args[0], nullptr));
++                args[0]->exprtype = sv.type;
++                if (sv.type->kind != TY_SLICE || !IsIntT(sv.type->sub) || sv.type->sub->intstorage != IS_I32)
++                    Error(c, cat("cuda_ld4 takes an i32 slice, not ", TypeStr(sv.type)));
++                CheckIntAny(args[1]);
++                auto rt = ast.ArrayOf(ast.inttypes[IS_I32], A_FIXED, c->line, 4);
++                c->rettypes.push_back(rt);
++                v.type = rt;
++                return v;
++            }
++            if (d.kind == B_CUDA_F2H2) {
++                // cuda_f2h2(x, y): the halves nearest x (low) and y (high) as
++                // one i32, an f16 mma fragment's pair.
++                CheckArg(args[0], ast.flttypes[FS_F32]);
++                CheckArg(args[1], ast.flttypes[FS_F32]);
++                v.type = ast.inttypes[IS_I32];
++                return v;
++            }
++            if (d.kind == B_CUDA_ATOMIC_ADD) {
++                // cuda_atomic_add(s, i, v): s[i] += v as one step across the
++                // GPU; the value before.
++                auto sv = DecayRef(CheckV(args[0], nullptr));
++                args[0]->exprtype = sv.type;
++                if (sv.type->kind != TY_SLICE || !IsIntT(sv.type->sub) || sv.type->sub->intstorage != IS_I32 ||
++                    sv.type->cq)
++                    Error(c, cat("cuda_atomic_add takes an i32[:], not ", TypeStr(sv.type)));
++                CheckIntAny(args[1]);
++                CheckArg(args[2], ast.inttypes[IS_I32]);
++                v.type = ast.inttypes[IS_I32];
++                return v;
++            }
++            if (d.kind == B_CUDA_H2F) {
++                // cuda_h2f(h): the f32 of IEEE half bits h.
++                CheckArg(args[0], ast.inttypes[IS_U16]);
++                v.type = ast.flttypes[FS_F32];
++                return v;
++            }
++            if (d.kind == B_CUDA_F2H) {
++                // cuda_f2h(x): the IEEE half bits nearest f32 x.
++                CheckArg(args[0], ast.flttypes[FS_F32]);
++                v.type = ast.inttypes[IS_U16];
++                return v;
++            }
++            if (d.kind == B_CUDA_DP4A) {
++                // cuda_dp4a(a, b, acc): the four signed byte products of a
++                // and b summed into acc.
++                for (int i = 0; i < 3; i++) CheckArg(args[i], ast.inttypes[IS_I32]);
++                v.type = ast.inttypes[IS_I32];
++                return v;
++            }
++            if (d.kind == B_CUDA_SHFL_XOR) {
++                // cuda_shfl_xor(x, m): x from the lane whose index is this
++                // one's xor m, across the whole warp.
++                auto xv = DecayRef(CheckV(args[0], nullptr));
++                args[0]->exprtype = xv.type;
++                if (!(IsF32(xv.type) || (IsIntT(xv.type) && xv.type->intstorage == IS_I32)))
++                    Error(c, cat("cuda_shfl_xor takes an f32 or i32, not ", TypeStr(xv.type)));
++                CheckIntAny(args[1]);
++                v.type = xv.type;
++                return v;
++            }
++            v.type = ast.inttypes[IS_I64];
++            return v;
++        }
 +        case B_MADD16: {
 +            // madd16(a, b): two i16[16]; lane k of the i32[8] is
 +            // a[2k]*b[2k] + a[2k+1]*b[2k+1], wrapping like vpmaddwd.
@@ -1428,6 +3026,99 @@ index 21a62e2..a497dcb 100644
          case B_COPY: {
              // copy(x): a fresh value from stored one (§4.1), for the
              // destinations that never copy implicitly.
+diff --git a/src/typecheck_calls.h b/src/typecheck_calls.h
+index 5d07ed2..9c8c49c 100644
+--- a/src/typecheck_calls.h
++++ b/src/typecheck_calls.h
+@@ -1386,6 +1386,8 @@ inline FnSpec *TypeCheck::GetOrCreateSpec(MatchInfo &mi, vector<Val> &argvals, N
+     // dispatched case or as a format overload.
+     if (sf->isthread)
+         Error(callnode, cat("thread_fn ", sf->name, " is spawned with thread_spawn, not called"));
++    if (sf->iscuda)
++        Error(callnode, cat("cuda fn ", sf->name, " runs on the GPU: start it with cuda_launch"));
+     // A nested function is specialized where it is declared (§7.5). A call
+     // that reaches the declaration ahead of the declaring body (a nested
+     // function declared earlier calling it) would have it name variables
+@@ -3730,6 +3732,36 @@ inline void TypeCheck::CheckReturn(Return *r) {
+ // body is checked like any other, reached from a spawn or from the
+ // driver rather than from a call.
+ 
++// A kernel's one specialization: scalars and slices of scalars, which a
++// launch passes as values and device buffers (cuda::buf).
++inline FnSpec *TypeCheck::EnsureCudaSpec(SFunction *sf, Line l) {
++    if (sf->brokensig) throw Abandoned {};
++    if (!sf->specs.empty()) {
++        if (sf->specs[0]->failed) throw Abandoned {};
++        return sf->specs[0];
++    }
++    if (!sf->generics.empty()) Error(l, cat("cuda fn ", sf->name, " cannot be generic"));
++    if (sf->has_rets) Error(l, cat("cuda fn ", sf->name, " cannot return values"));
++    auto spec = ast.NewFnSpec();
++    spec->sf = sf;
++    for (auto &p : sf->params) {
++        if (!p.type) Error(l, cat("cuda fn ", sf->name, " needs fully typed parameters"));
++        auto t = Subst(p.type);
++        ValidateType(t, sf->line, VT_PARAM);
++        auto e = t->kind == TY_SLICE ? t->sub : t;
++        if (!(IsIntT(e) || e->kind == TY_FLT || (e->kind == TY_BOOL && e == t)) || e->ix)
++            Error(l, cat("cuda fn parameters are scalars and slices of scalars, not ", TypeStr(t)));
++        spec->argtypes.push_back(t);
++    }
++    spec->roots.resize(spec->argtypes.size());
++    RootArg noview;
++    noview.cls = -1;
++    spec->views.resize(spec->argtypes.size(), noview);
++    sf->specs.push_back(spec);
++    CheckSpecBody(spec, nullptr, l);
++    return spec;
++}
++
+ inline FnSpec *TypeCheck::EnsureThreadSpec(SFunction *sf, Line l) {
+     if (sf->brokensig) throw Abandoned {};
+     // One an earlier spawn made, the checks below passed: a call makes none
+diff --git a/stdlib/cuda.goose b/stdlib/cuda.goose
+new file mode 100644
+index 0000000..71a09de
+--- /dev/null
++++ b/stdlib/cuda.goose
+@@ -0,0 +1,37 @@
++// The Goose standard library: `cuda` (docs/stdlib.md): the GPU through
++// CUDA's driver. A buf<T> is n Ts of device memory; a `cuda fn` takes one
++// for each slice parameter from cuda_launch(kernel, blocks, threads, ...),
++// which returns before the kernel finishes. Copies wait for the kernels
++// launched before them; sync waits for all of them.
++
++namespace cuda;
++
++struct buf<T> { p: u64, n: i64 }
++
++extern fn init() -> bool = "gs_cuda_init";               // false where there is no CUDA device
++extern fn device_name(out: u8[>..]&) -> bool = "gs_cuda_name";
++extern fn memory() -> i64 = "gs_cuda_memory";            // the device's bytes
++extern fn free_bytes(p: u64) = "gs_cuda_free";
++extern fn sync() = "gs_cuda_sync";
++// The launches between capture_begin and capture_end are recorded, not run:
++// graph_run replays them all with one call.
++extern fn capture_begin() = "gs_cuda_capture_begin";
++extern fn capture_end() -> u64 = "gs_cuda_capture_end";
++extern fn graph_run(g: u64) = "gs_cuda_graph_run";
++// A side line of launches: those after fork run after what came before it,
++// beside the main line, to which back returns; join makes the main line's
++// next launches wait for the side line's.
++extern fn fork() = "gs_cuda_fork";
++extern fn back() = "gs_cuda_back";
++extern fn join() = "gs_cuda_join";
++
++fn alloc<T>(n: i64) -> buf<T> { buf<T> { p: cuda_alloc<T>(n), n: n } }
++fn free<T>(b: buf<T>) { free_bytes(b.p); }
++fn upload<T>(b: buf<T>, s: const T[:]) {
++    assert(s.len <= b.n);
++    cuda_copy_in(b.p, s);
++}
++fn download<T>(b: buf<T>, s: T[:]) {
++    assert(s.len <= b.n);
++    cuda_copy_out(s, b.p);
++}
 diff --git a/stdlib/math.goose b/stdlib/math.goose
 index 1fbd6ab..68bb5e6 100644
 --- a/stdlib/math.goose

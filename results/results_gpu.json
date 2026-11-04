@@ -1,0 +1,217 @@
+{
+ "gpu": "NVIDIA GeForce RTX 4070 Ti, 621.01, 12282 MiB",
+ "model": "Qwen2.5-1.5B-Instruct",
+ "runs": 5,
+ "llama_cpp": "CUDA build, -ngl 99; llama-bench pp128..pp2048, tg128 and tg128 @ d2048, llama-lookup on test/p_code.txt",
+ "goose_llama": "--gpu: decode test/p_free.txt 256 tokens --draft 0 and 128 after test/p_pp2048.txt, prefill test/p_ppN.txt, speculative test/p_code.txt --draft 7",
+ "rows": [
+  {
+   "model": "q8_0",
+   "test": "decode",
+   "goose": 253.83,
+   "goose_runs": [
+    253.5,
+    253.83,
+    254.11,
+    254.21,
+    253.48
+   ],
+   "llama_cpp": 236.52,
+   "llama_cpp_sd": 0.64
+  },
+  {
+   "model": "q8_0",
+   "test": "decode @ 2048",
+   "goose": 238.08,
+   "goose_runs": [
+    238.08,
+    238.46,
+    236.42,
+    237.7,
+    238.7
+   ],
+   "llama_cpp": 227.29,
+   "llama_cpp_sd": 0.6
+  },
+  {
+   "model": "q8_0",
+   "test": "prefill 128",
+   "goose": 19648.8,
+   "goose_runs": [
+    19684.7,
+    19563.8,
+    19615.4,
+    19648.8,
+    19664.8
+   ],
+   "llama_cpp": 13159.37,
+   "llama_cpp_sd": 1874.24
+  },
+  {
+   "model": "q8_0",
+   "test": "prefill 512",
+   "goose": 33327.0,
+   "goose_runs": [
+    33413.6,
+    33327.0,
+    33198.2,
+    33364.2,
+    29896.9
+   ],
+   "llama_cpp": 24574.83,
+   "llama_cpp_sd": 1046.72
+  },
+  {
+   "model": "q8_0",
+   "test": "prefill 1024",
+   "goose": 32434.5,
+   "goose_runs": [
+    29241.9,
+    32557.7,
+    32548.9,
+    32434.5,
+    32152.2
+   ],
+   "llama_cpp": 23536.69,
+   "llama_cpp_sd": 143.89
+  },
+  {
+   "model": "q8_0",
+   "test": "prefill 2048",
+   "goose": 30701.6,
+   "goose_runs": [
+    30605.8,
+    29912.6,
+    30701.6,
+    30825.9,
+    30726.1
+   ],
+   "llama_cpp": 23257.98,
+   "llama_cpp_sd": 95.29
+  },
+  {
+   "model": "q8_0",
+   "test": "speculative (code edit)",
+   "goose": 736.61,
+   "goose_runs": [
+    735.56,
+    736.86,
+    730.23,
+    740.91,
+    736.61
+   ],
+   "llama_cpp": 464.175,
+   "llama_cpp_runs": [
+    466.736,
+    464.175,
+    465.129,
+    462.971,
+    463.23
+   ]
+  },
+  {
+   "model": "q4_k_m",
+   "test": "decode",
+   "goose": 362.46,
+   "goose_runs": [
+    363.58,
+    362.46,
+    361.07,
+    364.3,
+    361.63
+   ],
+   "llama_cpp": 336.17,
+   "llama_cpp_sd": 2.4
+  },
+  {
+   "model": "q4_k_m",
+   "test": "decode @ 2048",
+   "goose": 334.32,
+   "goose_runs": [
+    334.32,
+    332.65,
+    334.58,
+    334.57,
+    330.97
+   ],
+   "llama_cpp": 319.48,
+   "llama_cpp_sd": 1.5
+  },
+  {
+   "model": "q4_k_m",
+   "test": "prefill 128",
+   "goose": 21793.9,
+   "goose_runs": [
+    21832.9,
+    21715.9,
+    21793.9,
+    21738.8,
+    21836.3
+   ],
+   "llama_cpp": 14397.25,
+   "llama_cpp_sd": 2206.17
+  },
+  {
+   "model": "q4_k_m",
+   "test": "prefill 512",
+   "goose": 28610.4,
+   "goose_runs": [
+    28253.3,
+    28923.6,
+    28585.3,
+    28610.4,
+    28948.0
+   ],
+   "llama_cpp": 23441.58,
+   "llama_cpp_sd": 921.1
+  },
+  {
+   "model": "q4_k_m",
+   "test": "prefill 1024",
+   "goose": 28331.0,
+   "goose_runs": [
+    28217.8,
+    28345.3,
+    28239.6,
+    28379.3,
+    28331.0
+   ],
+   "llama_cpp": 22769.09,
+   "llama_cpp_sd": 104.34
+  },
+  {
+   "model": "q4_k_m",
+   "test": "prefill 2048",
+   "goose": 26980.0,
+   "goose_runs": [
+    27036.3,
+    26942.1,
+    26980.0,
+    27077.9,
+    26837.6
+   ],
+   "llama_cpp": 22536.81,
+   "llama_cpp_sd": 88.09
+  },
+  {
+   "model": "q4_k_m",
+   "test": "speculative (code edit)",
+   "goose": 793.34,
+   "goose_runs": [
+    794.33,
+    793.34,
+    792.84,
+    796.17,
+    773.61
+   ],
+   "llama_cpp": 588.935,
+   "llama_cpp_runs": [
+    594.383,
+    588.013,
+    588.935,
+    586.089,
+    604.353
+   ]
+  }
+ ]
+}
